@@ -781,6 +781,13 @@ async function scanSport(sport: SportConfig): Promise<SportsSignal[]> {
 
     if (positionSizeUsd < 1) continue;
 
+    // $20 minimum projected profit filter
+    const contractPrice = side === "yes" ? midPrice : (1 - midPrice);
+    const maxProfitPerContract = side === "yes" ? (1 - midPrice) : midPrice;
+    const estContracts = Math.max(1, Math.floor(positionSizeUsd / Math.max(contractPrice, 0.01)));
+    const projectedMaxProfit = estContracts * maxProfitPerContract;
+    if (projectedMaxProfit < 20) continue; // Skip if projected max profit < $20
+
     // Risk check
     const riskCheck = checkRiskLimits(dailyPnl, bankroll, sportExposure, sport, positionSizeUsd);
 

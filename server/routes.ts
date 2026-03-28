@@ -13,6 +13,10 @@ import {
   getAgentConfig, updateAgentConfig,
   type SportsAgentState, type SportConfig, type SportsSignal,
 } from "./sports-agent";
+import {
+  evaluatePosition, evaluateEntry, evaluateHedge, dailyScan, markTierTaken,
+  type PositionState, type DecisionAction,
+} from "./decision-engine";
 
 function getPositionsForRiskCheck(): PositionInfo[] {
   try {
@@ -28,6 +32,16 @@ function getPositionsForRiskCheck(): PositionInfo[] {
     return [];
   }
 }
+function categorizePosition(ticker: string): "sports" | "weather" | "crypto" | "finance" | "politics" | "novelty" {
+  const t = ticker.toUpperCase();
+  if (/NBA|NFL|MLB|NHL|SOCCER|GAME|PTS|NCAA|UFC|TENNIS/.test(t)) return "sports";
+  if (/HIGH|TEMP|RAIN|WEATHER|KXHIGH/.test(t)) return "weather";
+  if (/BTC|ETH|CRYPTO/.test(t)) return "crypto";
+  if (/INX|SPX|GDP|CPI|FED|RATE|UNEM/.test(t)) return "finance";
+  if (/PRES|SENATE|ELEC|APPROVAL/.test(t)) return "politics";
+  return "novelty";
+}
+
 import { randomUUID } from "crypto";
 
 const KALSHI_BASE = "https://api.elections.kalshi.com/trade-api/v2";
@@ -1873,6 +1887,54 @@ export async function registerRoutes(
           if (sigEvent) eventTickers.add(sigEvent);
         }
 
+        // ── Decision Engine: entry gating for BUY signals ──────────────────────
+        if (!isSell) {
+          const dePortfolioRow = db.select().from(portfolio).get();
+          const dePortfolioValue = (dePortfolioRow as any)?.totalBalance ?? 310;
+          const deCashAvailable = dePortfolioValue * 0.3; // approximate 30% cash reserve
+          const deDailyPnl = await storage.getDailyPnl();
+          const deDailyPnlPct = dePortfolioValue > 0 ? deDailyPnl / dePortfolioValue : 0;
+
+          // Build position states for the entry evaluator
+          const dePosRows = db.select().from(positions).all();
+          const dePositionStates: PositionState[] = dePosRows.map(p => {
+            const ep = p.entryPrice;
+            const cp = p.currentPrice;
+            const pp = ep > 0 ? (cp - ep) / ep : 0;
+            return {
+              ticker: p.ticker,
+              title: p.title,
+              side: p.side as "yes" | "no",
+              entryPrice: ep,
+              quantity: p.quantity,
+              currentPrice: cp,
+              unrealizedPnl: p.unrealizedPnl || 0,
+              unrealizedPnlPct: pp,
+              category: categorizePosition(p.ticker),
+              isLive: false,
+              entryTime: new Date(p.openedAt || Date.now()).getTime(),
+              peakPrice: Math.max(cp, ep),
+              peakPnlPct: Math.max(pp, 0),
+            };
+          });
+
+          // Build sport exposure map
+          const deSportExposure: Record<string, number> = {};
+          for (const ps of dePositionStates) {
+            if (ps.category === "sports" && ps.sport) {
+              deSportExposure[ps.sport] = (deSportExposure[ps.sport] || 0) + ps.quantity * ps.currentPrice;
+            }
+          }
+
+          const entryDecision = evaluateEntry(
+            sig, dePortfolioValue, deCashAvailable, dePositionStates, deSportExposure, deDailyPnlPct,
+          );
+          if (!entryDecision.allowed) {
+            console.log(`[Decision Engine] Entry blocked: ${sig.ticker} — ${entryDecision.reason}`);
+            continue;
+          }
+        }
+
         const side = (sig.signalType === "BUY_YES" || sig.signalType === "SELL_YES") ? "yes" : "no";
         const action = isSell ? "sell" : "buy";
         const priceCents = Math.round(sig.marketPrice * 100);
@@ -2178,6 +2240,94 @@ export async function registerRoutes(
         });
 
         console.log(`[Exit Monitor] ${autoExecuted ? "Auto-sold" : "Queued"}: ${sig.edgeSource} exit for ${sig.ticker}`);
+      }
+
+      // ── Decision Engine: Tiered profit-taking + stop-losses ──────────────────
+      const portfolioRow = db.select().from(portfolio).get();
+      const portfolioValue = (portfolioRow as any)?.totalBalance ?? 310;
+      const dailyPnl = await storage.getDailyPnl();
+      const dailyPnlPct = portfolioValue > 0 ? dailyPnl / portfolioValue : 0;
+
+      const positionStates: PositionState[] = posRows.map(p => {
+        const entryPrice = p.entryPrice;
+        const currentPrice = p.currentPrice;
+        const pnlPct = entryPrice > 0 ? (currentPrice - entryPrice) / entryPrice : 0;
+        const category = categorizePosition(p.ticker);
+        return {
+          ticker: p.ticker,
+          title: p.title,
+          side: p.side as "yes" | "no",
+          entryPrice,
+          quantity: p.quantity,
+          currentPrice,
+          unrealizedPnl: p.unrealizedPnl || 0,
+          unrealizedPnlPct: pnlPct,
+          category,
+          isLive: false, // would need live game state to determine
+          entryTime: new Date(p.openedAt || Date.now()).getTime(),
+          peakPrice: Math.max(currentPrice, entryPrice),
+          peakPnlPct: Math.max(pnlPct, 0),
+        };
+      });
+
+      for (const posState of positionStates) {
+        const decision = evaluatePosition(posState, portfolioValue, dailyPnlPct);
+
+        if (decision.type === "HOLD") continue;
+
+        // Check if we already have a pending exit for this ticker
+        if (existingExitTickers.has(posState.ticker)) continue;
+
+        const side = posState.side;
+        const priceCents = Math.round(posState.currentPrice * 100);
+
+        // In supervised/autonomous mode: auto-execute
+        if (currentMode === "autonomous" || currentMode === "supervised") {
+          const execResult = await autoExecuteTrade(posState.ticker, side, "sell", decision.contracts, priceCents);
+          if (execResult.ok) {
+            markTierTaken(posState.ticker, decision.tier ?? 0);
+            capitalFreed += decision.contracts * posState.currentPrice;
+            console.log(`[Decision Engine] ${decision.type}: ${posState.ticker} — ${decision.reason}`);
+            await storage.createAuditLog({
+              eventType: "DECISION_ENGINE" as any,
+              ticker: posState.ticker,
+              description: `[${decision.type}] ${decision.reason} | Sold ${decision.contracts} @ ${priceCents}¢`,
+              amount: decision.contracts * posState.currentPrice,
+              status: "ok",
+              createdAt: new Date().toISOString(),
+            });
+          }
+        } else {
+          // Queue as pending trade for HITL approval
+          await storage.createPendingTrade({
+            ticker: posState.ticker,
+            title: posState.title,
+            side,
+            action: "sell",
+            contracts: decision.contracts,
+            priceCents,
+            estimatedCost: parseFloat((decision.contracts * posState.currentPrice).toFixed(2)),
+            maxProfit: parseFloat((decision.contracts * posState.currentPrice).toFixed(2)),
+            edgeScore: 0,
+            trueProbability: 0,
+            marketPrice: posState.currentPrice,
+            modelConfidence: 0,
+            modelName: "decision-engine",
+            edgeSource: `decision_engine_${decision.type.toLowerCase()}`,
+            reasoning: decision.reason,
+            status: "pending",
+            createdAt: new Date().toISOString(),
+            decidedAt: null,
+            executedAt: null,
+            orderId: null,
+            errorMessage: null,
+            gapType: null,
+            executableEdge: null,
+            kellySize: null,
+            autoExecuted: false,
+          });
+          console.log(`[Decision Engine] Queued ${decision.type} for HITL: ${posState.ticker} — ${decision.reason}`);
+        }
       }
 
       // ── Reinvestment Scan: after profitable sells, look for new opportunities ──
