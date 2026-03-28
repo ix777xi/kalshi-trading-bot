@@ -33,7 +33,7 @@ const RISK_IMPERATIVES = [
   },
   {
     risk: "Regulatory risk",
-    mitigation: "Track state-level cease-and-desist orders (7 states active Q1 2026)",
+    mitigation: "7 US states have active cease-and-desist orders as of Q1 2026. Check kalshi.com/legal for your state before trading.",
     configKey: null,
     statusFn: (_cfg: any) => "yellow",
   },
@@ -51,9 +51,15 @@ const RISK_IMPERATIVES = [
   },
   {
     risk: "Cross-platform execution risk",
-    mitigation: "Use limit orders on both sides; never market-order on thin book",
+    mitigation: "All orders use post_only=true limit orders — maker-only fills, no taker exposure.",
     configKey: null,
-    statusFn: (_cfg: any) => "yellow",
+    statusFn: (_cfg: any) => "green",
+  },
+  {
+    risk: "Thin book protection",
+    mitigation: "Minimum 48 contracts depth required before any trade. Scanner enforces this hardcoded guardrail.",
+    configKey: null,
+    statusFn: (_cfg: any) => "green",
   },
 ];
 

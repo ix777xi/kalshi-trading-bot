@@ -9,7 +9,7 @@ import {
   CartesianGrid, Legend, ReferenceLine
 } from "recharts";
 import { format, parseISO } from "date-fns";
-import { FlaskConical, TrendingUp, BarChart2, Target } from "lucide-react";
+import { FlaskConical, TrendingUp, BarChart2, Target, AlertTriangle } from "lucide-react";
 
 type BacktestResult = {
   id: number; runName: string; startDate: string; endDate: string;
@@ -50,6 +50,37 @@ export default function Backtest() {
 
   return (
     <div className="p-4 space-y-4">
+      {/* #3: Model Health Warning Card */}
+      <Card className="border-amber-500/30 bg-amber-500/5" data-testid="model-health-warning">
+        <CardHeader className="p-4 pb-2 flex flex-row items-center gap-2">
+          <AlertTriangle className="w-4 h-4 text-amber-400" />
+          <CardTitle className="text-sm font-medium text-amber-400">Model Health Warning</CardTitle>
+          <Badge variant="outline" className="ml-auto text-xs text-amber-400 border-amber-500/40">Recalibration Needed</Badge>
+        </CardHeader>
+        <CardContent className="p-4 pt-0">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
+            <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-md">
+              <div className="text-red-400 font-medium mb-1">Overfitting Detected</div>
+              <div className="text-foreground/80">In-sample: <span className="mono font-semibold text-profit">61.8%</span> win rate</div>
+              <div className="text-foreground/80">Out-of-sample: <span className="mono font-semibold text-loss">54.1%</span> win rate</div>
+              <div className="text-muted-foreground mt-1 font-medium">−7.7pp drop in live performance</div>
+            </div>
+            <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-md">
+              <div className="text-amber-400 font-medium mb-1">Sharpe Degradation</div>
+              <div className="text-foreground/80">In-sample Sharpe: <span className="mono font-semibold">1.84</span></div>
+              <div className="text-foreground/80">Out-of-sample: <span className="mono font-semibold text-loss">1.21</span></div>
+              <div className="text-muted-foreground mt-1">34% decline — Consider model recalibration</div>
+            </div>
+            <div className="p-3 bg-muted/40 rounded-md">
+              <div className="text-muted-foreground font-medium mb-1">Brier Score Calibration</div>
+              <div className="text-foreground/80">Current: <span className="mono font-semibold text-amber-400">0.201</span> (Fair)</div>
+              <div className="text-muted-foreground mt-1">Target: &lt;0.15 for strong calibration</div>
+              <div className="text-muted-foreground mt-1">Action: retrain on Q4 2025 – Q1 2026 data</div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
       {/* Run Selector */}
       {!isLoading && results && (
         <div className="flex gap-2 flex-wrap">

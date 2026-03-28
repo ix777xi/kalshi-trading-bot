@@ -331,37 +331,37 @@ export default function SettingsPage() {
         </CardHeader>
         <CardContent className="p-4 pt-0 space-y-5">
           <p className="text-xs text-muted-foreground">
-            The bot scans live Kalshi markets every 60 seconds and queues trades for your approval in the HITL page.
+            The bot scans live Kalshi markets every 60 seconds and queues trades for your approval. Default mode: <span className="text-amber-400 font-medium">Supervised</span> — only trades with ≥8% edge AND ≥80% confidence auto-execute.
           </p>
 
           {/* Min Edge Threshold */}
           <div className="space-y-2">
             <div className="flex items-center justify-between">
               <Label className="text-xs text-muted-foreground">Min Edge Threshold</Label>
-              <span className="text-xs font-medium mono">{botForm.autoMinEdge ?? 5}%</span>
+              <span className="text-xs font-medium mono">{botForm.autoMinEdge ?? 8}%</span>
             </div>
             <Slider
               data-testid="slider-min-edge"
               min={3} max={20} step={0.5}
-              value={[botForm.autoMinEdge ?? 5]}
+              value={[botForm.autoMinEdge ?? 8]}
               onValueChange={([v]) => setBotForm(f => ({ ...f, autoMinEdge: v }))}
             />
-            <p className="text-[10px] text-muted-foreground">Minimum edge % for a signal to become a pending trade.</p>
+            <p className="text-[10px] text-muted-foreground">Minimum edge % for a signal to become a pending trade. Default: 8% (raised from 5% for quality control).</p>
           </div>
 
           {/* Min Confidence */}
           <div className="space-y-2">
             <div className="flex items-center justify-between">
               <Label className="text-xs text-muted-foreground">Min Model Confidence</Label>
-              <span className="text-xs font-medium mono">{botForm.autoMinConfidence ?? 75}%</span>
+              <span className="text-xs font-medium mono">{botForm.autoMinConfidence ?? 80}%</span>
             </div>
             <Slider
               data-testid="slider-min-confidence"
               min={50} max={95} step={1}
-              value={[botForm.autoMinConfidence ?? 75]}
+              value={[botForm.autoMinConfidence ?? 80]}
               onValueChange={([v]) => setBotForm(f => ({ ...f, autoMinConfidence: v }))}
             />
-            <p className="text-[10px] text-muted-foreground">Minimum model confidence required to queue a trade.</p>
+            <p className="text-[10px] text-muted-foreground">Minimum model confidence required to queue a trade. Default: 80% (raised from 75%).</p>
           </div>
 
           {/* Max Contracts */}
@@ -532,11 +532,11 @@ export default function SettingsPage() {
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
                   <Label className="text-xs text-muted-foreground">Minimum Edge Alert (%)</Label>
-                  <span className="text-xs font-medium mono">{form.minEdgeAlert || 5}%</span>
+                  <span className="text-xs font-medium mono">{form.minEdgeAlert || 8}%</span>
                 </div>
                 <Slider
                   min={1} max={20} step={0.5}
-                  value={[form.minEdgeAlert || 5]}
+                  value={[form.minEdgeAlert || 8]}
                   onValueChange={([v]) => setForm(f => ({ ...f, minEdgeAlert: v }))}
                 />
               </div>
@@ -575,11 +575,11 @@ export default function SettingsPage() {
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
                   <Label className="text-xs text-muted-foreground">Scan Frequency (seconds)</Label>
-                  <span className="text-xs font-medium mono">{form.scanFrequency || 30}s</span>
+                  <span className="text-xs font-medium mono">{form.scanFrequency || 60}s</span>
                 </div>
                 <Slider
                   min={10} max={300} step={10}
-                  value={[form.scanFrequency || 30]}
+                  value={[form.scanFrequency || 60]}
                   onValueChange={([v]) => setForm(f => ({ ...f, scanFrequency: v }))}
                 />
               </div>

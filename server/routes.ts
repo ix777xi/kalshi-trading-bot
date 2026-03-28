@@ -6,7 +6,7 @@ import {
   positions, orders, signals, agents, portfolio, pnlHistory,
   riskConfig, auditLog, backtestResults, equityCurve, settings, pendingTrades,
 } from "@shared/schema";
-import { generateLiveSignals, checkPositionExits, type PositionInfo, type PositionExitCheck } from "./signal-engine";
+import { generateLiveSignals, checkPositionExits, calculateDynamicKelly, getCategoryMultiplier, type PositionInfo, type PositionExitCheck } from "./signal-engine";
 import { generateLiveSportsSignals, type LiveSportsState } from "./live-sports-engine";
 
 function getPositionsForRiskCheck(): PositionInfo[] {
@@ -324,9 +324,13 @@ function seedDatabase() {
     kalshiPrivateKey: "",
     notifyOnSignal: true,
     notifyOnFill: true,
-    minEdgeAlert: 5,
-    scanFrequency: 30,
+    minEdgeAlert: 8,       // #8: raised from 5 to 8
+    scanFrequency: 60,     // #8: raised from 30 to 60s
     llmModel: "gpt-4o",
+    // #7: supervised mode with tighter thresholds
+    botMode: "supervised",
+    autoMinEdge: 8,        // #7: raised from 5 to 8
+    autoMinConfidence: 80, // #7: raised from 75 to 80
     updatedAt: fmt(now),
   }).run();
 
@@ -343,7 +347,8 @@ export async function registerRoutes(
   // ── Kalshi API Proxy ─────────────────────────────────────────────────────
   const ACTIVE_SERIES = [
     "KXHIGHNY", "KXNBAGAME", "KXNBAPTS", "KXFEDRATE",
-    "KXCPI", "KXINX", "KXNFLGAME", "KXGDP"
+    "KXCPI", "KXINX", "KXNFLGAME", "KXGDP",
+    "KXBTC", "KXETH", "KXAPPROVAL", "KXUNEM",
   ];
 
   app.get("/api/kalshi/markets", async (req, res) => {
@@ -791,11 +796,11 @@ export async function registerRoutes(
   // ── Bot Config ────────────────────────────────────────────────────────────
   app.get("/api/bot/config", async (_req, res) => {
     const s = await storage.getSettings();
-    if (!s) return res.json({ botMode: "hitl", autoMinEdge: 5, autoMinConfidence: 75, autoMaxContracts: 50, autoMaxCost: 50, dailyLossLimit: 500, maxDrawdownLimit: 20 });
+    if (!s) return res.json({ botMode: "supervised", autoMinEdge: 8, autoMinConfidence: 80, autoMaxContracts: 50, autoMaxCost: 50, dailyLossLimit: 500, maxDrawdownLimit: 20 });
     res.json({
-      botMode: (s as any).botMode || "hitl",
-      autoMinEdge: (s as any).autoMinEdge ?? 5,
-      autoMinConfidence: (s as any).autoMinConfidence ?? 75,
+      botMode: (s as any).botMode || "supervised",
+      autoMinEdge: (s as any).autoMinEdge ?? 8,
+      autoMinConfidence: (s as any).autoMinConfidence ?? 80,
       autoMaxContracts: (s as any).autoMaxContracts ?? 50,
       autoMaxCost: (s as any).autoMaxCost ?? 50,
       dailyLossLimit: (s as any).dailyLossLimit ?? 500,
@@ -1536,6 +1541,15 @@ export async function registerRoutes(
             continue;
           }
 
+          // #2: Weather concentration guard
+          if (sig.edgeSource === "weather_model") {
+            const weatherCount = allActive.filter((t: any) => t.edgeSource === "weather_model" && t.status === "pending").length;
+            if (weatherCount >= 3) {
+              console.log(`[Weather Concentration Guard] Skipping ${sig.ticker}: already ${weatherCount} weather trades pending`);
+              continue;
+            }
+          }
+
           // Correlation guard: avoid multi-bracket in same event
           const sigEvent = sig.eventTicker || sig.ticker.split("-").slice(0, -1).join("-");
           if (sigEvent && eventTickers.has(sigEvent)) {
@@ -1551,9 +1565,18 @@ export async function registerRoutes(
         const side = (sig.signalType === "BUY_YES" || sig.signalType === "SELL_YES") ? "yes" : "no";
         const action = isSell ? "sell" : "buy";
         const priceCents = Math.round(sig.marketPrice * 100);
+        // #5: Dynamic Kelly sizing (replaces flat contract sizing)
+        const categoryMult = getCategoryMultiplier(sig.edgeSource, sig.ticker);
         const contracts = isSell
           ? 50
-          : Math.min(maxContracts, Math.max(1, Math.floor(maxCost / Math.max(sig.marketPrice, 0.01))));
+          : calculateDynamicKelly(
+              Math.abs(sig.edgeScore) / 100,
+              sig.modelConfidence,
+              12000, // approximate bankroll
+              sig.marketPrice,
+              100,   // default depth estimate
+              categoryMult
+            );
         const estimatedCost = parseFloat((contracts * sig.marketPrice).toFixed(2));
         const maxProfit = isSell ? estimatedCost : parseFloat((contracts * (1 - sig.marketPrice)).toFixed(2));
 

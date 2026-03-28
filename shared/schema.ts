@@ -171,17 +171,17 @@ export const settings = sqliteTable("settings", {
   kalshiPrivateKey: text("kalshi_private_key").notNull().default(""),
   notifyOnSignal: integer("notify_on_signal", { mode: "boolean" }).notNull().default(true),
   notifyOnFill: integer("notify_on_fill", { mode: "boolean" }).notNull().default(true),
-  minEdgeAlert: real("min_edge_alert").notNull().default(5),
-  scanFrequency: integer("scan_frequency").notNull().default(30),
+  minEdgeAlert: real("min_edge_alert").notNull().default(8),
+  scanFrequency: integer("scan_frequency").notNull().default(60),
   llmModel: text("llm_model").notNull().default("gpt-4o"),
   updatedAt: text("updated_at").notNull(),
   // Bot mode system
-  botMode: text("bot_mode").notNull().default("hitl"), // 'hitl' | 'supervised' | 'autonomous' | 'halted'
+  botMode: text("bot_mode").notNull().default("supervised"), // 'hitl' | 'supervised' | 'autonomous' | 'halted'
   dailyLossLimit: real("daily_loss_limit").notNull().default(500),
   maxDrawdownLimit: real("max_drawdown_limit").notNull().default(20),
   autonomousConfirmedAt: text("autonomous_confirmed_at"),
-  autoMinEdge: real("auto_min_edge").notNull().default(5),
-  autoMinConfidence: real("auto_min_confidence").notNull().default(75),
+  autoMinEdge: real("auto_min_edge").notNull().default(8),
+  autoMinConfidence: real("auto_min_confidence").notNull().default(80),
   autoMaxContracts: integer("auto_max_contracts").notNull().default(50),
   autoMaxCost: real("auto_max_cost").notNull().default(50),
 });

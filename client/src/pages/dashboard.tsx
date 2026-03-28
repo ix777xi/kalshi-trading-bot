@@ -11,7 +11,7 @@ import {
 import {
   TrendingUp, TrendingDown, DollarSign, Activity, Percent,
   BarChart2, AlertTriangle, CheckCircle2, Clock, Zap, ShieldAlert,
-  ShoppingCart, XCircle, PauseCircle, Target, Timer
+  ShoppingCart, XCircle, PauseCircle, Target, Timer, ArrowUp, ArrowDown, ArrowRight
 } from "lucide-react";
 import { format, parseISO } from "date-fns";
 import { useLocation } from "wouter";
@@ -389,7 +389,14 @@ export default function Dashboard() {
       <Card>
         <CardHeader className="p-4 pb-2 flex flex-row items-center justify-between gap-1">
           <CardTitle className="text-sm font-medium">Performance Analytics</CardTitle>
-          <Badge variant="outline" className="text-xs mono">Live Tracking</Badge>
+          <div className="flex items-center gap-2">
+            {/* #3: Model Health indicator */}
+            <div className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-amber-500/10 border border-amber-500/20" data-testid="model-health-indicator">
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400" />
+              <span className="text-[10px] text-amber-400">Recalibration recommended</span>
+            </div>
+            <Badge variant="outline" className="text-xs mono">Live Tracking</Badge>
+          </div>
         </CardHeader>
         <CardContent className="p-4 pt-0">
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -478,6 +485,75 @@ export default function Dashboard() {
               </div>
             </div>
           </div>
+        </CardContent>
+      </Card>
+
+      {/* #9: Capital Allocation Recommendation */}
+      <Card data-testid="recommended-allocation-card">
+        <CardHeader className="p-4 pb-2 flex flex-row items-center justify-between gap-1">
+          <CardTitle className="text-sm font-medium">Recommended Capital Allocation</CardTitle>
+          <Badge variant="outline" className="text-xs mono">Rebalance Needed</Badge>
+        </CardHeader>
+        <CardContent className="p-4 pt-0">
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-border">
+                  <th className="text-left px-3 py-2 text-muted-foreground font-medium">Category</th>
+                  <th className="text-right px-3 py-2 text-muted-foreground font-medium">Current %</th>
+                  <th className="text-right px-3 py-2 text-muted-foreground font-medium">Recommended %</th>
+                  <th className="text-left px-3 py-2 text-muted-foreground font-medium w-28">Action</th>
+                  <th className="text-left px-3 py-2 text-muted-foreground font-medium w-48">Allocation Bar</th>
+                </tr>
+              </thead>
+              <tbody>
+                {[
+                  { category: "Weather",      current: 15, recommended: 30, action: "increase" },
+                  { category: "Economics",    current: 30, recommended: 25, action: "hold" },
+                  { category: "World Events", current: 0,  recommended: 20, action: "increase" },
+                  { category: "Sports",       current: 22, recommended: 15, action: "reduce" },
+                  { category: "Politics",     current: 14, recommended: 5,  action: "reduce" },
+                  { category: "Technology",   current: 26, recommended: 3,  action: "reduce" },
+                  { category: "Finance",      current: 16, recommended: 2,  action: "reduce" },
+                ].map((row) => {
+                  const isIncrease = row.action === "increase";
+                  const isHold = row.action === "hold";
+                  const isReduce = row.action === "reduce";
+                  const actionColor = isIncrease ? "text-profit" : isHold ? "text-amber-400" : "text-loss";
+                  const ActionIcon = isIncrease ? ArrowUp : isHold ? ArrowRight : ArrowDown;
+                  const barColor = isIncrease ? "#22d3ee" : isHold ? "#f59e0b" : "#ef4444";
+                  return (
+                    <tr key={row.category} className="border-b border-border/40 hover:bg-muted/20" data-testid={`alloc-row-${row.category.toLowerCase().replace(/\s/g, '-')}`}>
+                      <td className="px-3 py-2 font-medium">{row.category}</td>
+                      <td className="px-3 py-2 text-right mono text-muted-foreground">{row.current}%</td>
+                      <td className={`px-3 py-2 text-right mono font-semibold ${actionColor}`}>{row.recommended}%</td>
+                      <td className={`px-3 py-2 ${actionColor}`}>
+                        <span className="flex items-center gap-1">
+                          <ActionIcon className="w-3 h-3" />
+                          <span className="capitalize">{isIncrease ? "Increase" : isHold ? "Hold" : "Reduce"}</span>
+                        </span>
+                      </td>
+                      <td className="px-3 py-2">
+                        <div className="flex items-center gap-1">
+                          <div className="flex-1 h-2 bg-muted/30 rounded-full overflow-hidden">
+                            <div
+                              className="h-full rounded-full transition-all"
+                              style={{ width: `${Math.max(row.current, row.recommended)}%`, background: barColor, opacity: 0.6 }}
+                            />
+                          </div>
+                          <div
+                            className="h-2 rounded-full"
+                            style={{ width: `${row.recommended}%`, minWidth: 4, background: barColor, position: "absolute" }}
+                          />
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <p className="text-[10px] text-muted-foreground mt-3">Dynamic Kelly + category multipliers handle actual rebalancing. This is a guidance display — Weather and Economics show strongest documented edges.</p>
         </CardContent>
       </Card>
 

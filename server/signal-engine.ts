@@ -455,7 +455,7 @@ function analyzeMarketStructure(market: KalshiMarket): LiveSignal | null {
   const midPrice = (yesBid + yesAsk) / 2;
 
   // Wide spread + high OI = market maker opportunity
-  if (spread > 0.05 && oi > 500 && volume > 200) {
+  if (spread > 0.03 && oi > 500 && volume > 200) {
     // The maker-taker gap is structurally +1.12% for makers
     const makerEdge = 1.12 + (spread * 100 * 0.3); // wider spread = more edge for limit orders
 
@@ -531,8 +531,11 @@ function analyzeRiskExits(market: KalshiMarket, positions: PositionInfo[]): Live
       ? ((currentPrice - entryPrice) / entryPrice) * 100
       : ((entryPrice - currentPrice) / entryPrice) * 100;
 
-    // ── RISK #1: Stop-loss hit — position down 50%+ ──
-    if (pnlPct <= -50) {
+    // ── RISK #1: Stop-loss hit — position down 50%+ (25% for Finance/Crypto per #6) ──
+    const ticker = market.ticker.toUpperCase();
+    const isFinanceOrCrypto = /BTC|ETH|CRYPTO|AAPL|TSLA|NVDA|STOCK|KXINX/.test(ticker);
+    const stopLossThreshold = isFinanceOrCrypto ? -25 : -50;
+    if (pnlPct <= stopLossThreshold) {
       signals.push({
         ticker: market.ticker,
         title: market.title || market.ticker,
@@ -544,7 +547,7 @@ function analyzeRiskExits(market: KalshiMarket, positions: PositionInfo[]): Live
         modelConfidence: 0.95,
         modelName: "Risk-Monitor",
         edgeSource: "stop_loss",
-        reasoning: `STOP-LOSS triggered. Your ${pos.side.toUpperCase()} position entered at ${(entryPrice*100).toFixed(0)}¢ is now at ${(currentPrice*100).toFixed(0)}¢ — down ${Math.abs(pnlPct).toFixed(0)}%. The position has lost more than 50% of entry value. Risk management imperative: exit to preserve capital. Remaining in a losing position beyond stop-loss increases adverse selection risk.`,
+        reasoning: `STOP-LOSS triggered. Your ${pos.side.toUpperCase()} position entered at ${(entryPrice*100).toFixed(0)}¢ is now at ${(currentPrice*100).toFixed(0)}¢ — down ${Math.abs(pnlPct).toFixed(0)}%. ${isFinanceOrCrypto ? 'Finance/Crypto positions use a tighter 25% stop-loss due to near-efficient markets and weak model edge.' : 'The position has lost more than 50% of entry value.'} Risk management imperative: exit to preserve capital. Remaining in a losing position beyond stop-loss increases adverse selection risk.`,
         riskLevel: "critical",
         createdAt: new Date().toISOString(),
         gapType: "D" as const,
@@ -660,6 +663,171 @@ function analyzeRiskExits(market: KalshiMarket, positions: PositionInfo[]): Live
   return signals;
 }
 
+// ── Edge #7: Intra-Market Arbitrage ──────────────────────────────────────────
+// For multi-bracket events, the sum of all YES prices must equal $1.00
+// If sum < $0.97: BUY-ALL (risk-free, buy one of each bracket)
+// If sum > $1.03: SELL-ALL (risk-free, sell one of each bracket)
+
+function analyzeIntraMarketArbitrage(marketsByEvent: Record<string, KalshiMarket[]>): LiveSignal[] {
+  const signals: LiveSignal[] = [];
+
+  for (const [eventTicker, markets] of Object.entries(marketsByEvent)) {
+    if (markets.length < 3) continue; // Need at least 3 brackets
+
+    // Sum all YES bid prices
+    let sumYesBid = 0;
+    let validCount = 0;
+    for (const m of markets) {
+      const yesBid = parseFloat(m.yes_bid_dollars || "0");
+      if (yesBid > 0) {
+        sumYesBid += yesBid;
+        validCount++;
+      }
+    }
+
+    if (validCount < 3) continue;
+
+    const edgeMarket = markets[0];
+    const spread = 0.01; // Structural arbitrage — spread is embedded in gap
+    const { executableEdge, kellySize } = computeEdgeMetrics(0.03, spread);
+    const liquidityDepth = Math.min(...markets.map(estimateLiquidityDepth));
+
+    if (sumYesBid < 0.97) {
+      // BUY-ALL: buying one of each bracket guarantees $1 payout
+      const gap = 0.97 - sumYesBid;
+      signals.push({
+        ticker: `${eventTicker}-ARB`,
+        title: `Intra-Market Arb: BUY-ALL ${eventTicker} (${markets.length} brackets, sum=${sumYesBid.toFixed(3)})`,
+        eventTicker,
+        edgeScore: parseFloat((gap * 100).toFixed(2)),
+        trueProbability: 1.0,
+        marketPrice: sumYesBid / markets.length,
+        signalType: "BUY_YES",
+        modelConfidence: 0.95,
+        modelName: "Intra-Market-Arbitrage",
+        edgeSource: "intra_market_arbitrage",
+        reasoning: `RISK-FREE ARBITRAGE: Sum of all YES bids = ${sumYesBid.toFixed(3)} < $0.97. Buying one contract from each of ${markets.length} mutually exclusive brackets guarantees $1.00 payout at resolution. Net cost: $${sumYesBid.toFixed(3)}, guaranteed return: $${(0.97 - sumYesBid).toFixed(3)} (${(gap * 100).toFixed(1)}% risk-free). This is structural — execute immediately before the gap closes.`,
+        riskLevel: "low",
+        createdAt: new Date().toISOString(),
+        gapType: "C",
+        spread: 0,
+        executableEdge: parseFloat((gap).toFixed(4)),
+        liquidityDepth,
+        kellySize: parseFloat((gap * 1000).toFixed(2)),
+      });
+    } else if (sumYesBid > 1.03) {
+      // SELL-ALL: selling one of each bracket guarantees collecting more than $1
+      const gap = sumYesBid - 1.03;
+      signals.push({
+        ticker: `${eventTicker}-ARB`,
+        title: `Intra-Market Arb: SELL-ALL ${eventTicker} (${markets.length} brackets, sum=${sumYesBid.toFixed(3)})`,
+        eventTicker,
+        edgeScore: parseFloat((-gap * 100).toFixed(2)),
+        trueProbability: 0.0,
+        marketPrice: sumYesBid / markets.length,
+        signalType: "SELL_YES",
+        modelConfidence: 0.95,
+        modelName: "Intra-Market-Arbitrage",
+        edgeSource: "intra_market_arbitrage",
+        reasoning: `RISK-FREE ARBITRAGE: Sum of all YES bids = ${sumYesBid.toFixed(3)} > $1.03. Selling one contract from each of ${markets.length} mutually exclusive brackets locks in $${sumYesBid.toFixed(3)} collected, max liability $1.00. Net profit: $${(sumYesBid - 1.03).toFixed(3)} (${(gap * 100).toFixed(1)}% risk-free). Execute immediately.`,
+        riskLevel: "low",
+        createdAt: new Date().toISOString(),
+        gapType: "C",
+        spread: 0,
+        executableEdge: parseFloat((gap).toFixed(4)),
+        liquidityDepth,
+        kellySize: parseFloat((gap * 1000).toFixed(2)),
+      });
+    }
+  }
+
+  return signals;
+}
+
+// ── Edge #8: Stale Pricing Detection ─────────────────────────────────────────
+// If a market's last_price_dollars is very different from current yes_bid (>10¢ diff)
+// AND the market has >1000 volume → stale pricing gap
+
+function analyzeStalePrice(market: KalshiMarket): LiveSignal | null {
+  const lastPrice = parseFloat(market.last_price_dollars || "0");
+  const yesBid = parseFloat(market.yes_bid_dollars || "0");
+  const volume = parseFloat(market.volume_fp || "0");
+
+  if (lastPrice <= 0 || yesBid <= 0) return null;
+  if (volume < 1000) return null; // Only liquid markets
+
+  const diff = Math.abs(lastPrice - yesBid);
+  if (diff <= 0.10) return null; // Need >10¢ gap
+
+  const midPrice = yesBid;
+  const signalType = lastPrice > yesBid ? "BUY_YES" : "BUY_NO";
+  const yesAsk = parseFloat(market.yes_ask_dollars || "0");
+  const spread = Math.max(0, yesAsk - yesBid);
+  const theoreticalEdge = diff;
+  const { executableEdge, kellySize } = computeEdgeMetrics(theoreticalEdge, spread);
+  const liquidityDepth = estimateLiquidityDepth(market);
+  const edgeSource = "stale_pricing";
+
+  if (liquidityDepth < MIN_DEPTH) return null;
+  if (executableEdge < MIN_EXEC_EDGE) return null;
+  if (spread > MAX_SPREAD) return null;
+
+  return {
+    ticker: market.ticker,
+    title: market.title || market.ticker,
+    eventTicker: market.event_ticker,
+    edgeScore: parseFloat((diff * 100).toFixed(2)),
+    trueProbability: parseFloat(Math.max(0.01, Math.min(0.99, lastPrice)).toFixed(3)),
+    marketPrice: parseFloat(midPrice.toFixed(3)),
+    signalType,
+    modelConfidence: 0.75,
+    modelName: "Stale-Price-Detector",
+    edgeSource,
+    reasoning: `STALE PRICING: Last traded price (${(lastPrice*100).toFixed(0)}¢) diverges ${(diff*100).toFixed(0)}¢ from current bid (${(yesBid*100).toFixed(0)}¢) on a market with ${volume.toFixed(0)} volume. High-volume markets with large last-price gaps indicate delayed repricing — the market hasn't adjusted to recent information. ${signalType === "BUY_YES" ? `Last price suggests fair value is higher — consider buying YES.` : `Current bid is above last traded price — consider buying NO.`}`,
+    riskLevel: diff > 0.20 ? "low" : "medium",
+    createdAt: new Date().toISOString(),
+    gapType: "A",
+    spread: parseFloat(spread.toFixed(4)),
+    executableEdge,
+    liquidityDepth,
+    kellySize,
+  };
+}
+
+// ── #5: Dynamic Kelly Sizing ──────────────────────────────────────────────────
+
+export function calculateDynamicKelly(
+  edge: number,         // decimal, e.g., 0.15 for 15%
+  confidence: number,   // 0-1
+  bankroll: number,
+  marketPrice: number,  // 0-1
+  depth: number,        // contracts
+  categoryMultiplier: number // 0-1
+): number {
+  const p = Math.min(0.95, Math.max(0.5, (marketPrice + edge))); // adjusted win prob
+  const b = (1 / Math.max(marketPrice, 0.01)) - 1; // odds
+  const q = 1 - p;
+  const fullKelly = Math.max(0, (b * p - q) / b);
+  const quarterKelly = fullKelly / 4;
+  const kellyDollars = quarterKelly * bankroll * categoryMultiplier;
+  const contracts = Math.floor(kellyDollars / Math.max(marketPrice, 0.01));
+  return Math.max(1, Math.min(contracts, Math.floor(depth * 0.25), Math.floor(500 / Math.max(marketPrice, 0.01)), 200));
+}
+
+// ── #6: Category Risk Multipliers ─────────────────────────────────────────────
+
+export function getCategoryMultiplier(edgeSource: string, ticker: string): number {
+  const t = ticker.toUpperCase();
+  if (/TEMP|RAIN|WEATH|HIGH|LOW|KXHIGH/i.test(t)) return 1.0;   // Weather — strongest
+  if (/FED|CPI|GDP|UNEM|RATE|KXFED|KXCPI|KXGDP/i.test(t)) return 0.9; // Economics
+  if (edgeSource === "intra_market_arbitrage") return 1.0; // Arbitrage — risk-free
+  if (/NBA|NFL|SPORT|GAME/i.test(t)) return 0.7;  // Sports
+  if (/BTC|ETH|CRYPTO/i.test(t)) return 0.4;      // Crypto — weak model
+  if (/AAPL|TSLA|NVDA|STOCK|KXINX/i.test(t)) return 0.3; // Finance — near efficient
+  if (/PRES|SENATE|ELEC/i.test(t)) return 0.6;    // Politics
+  return 0.5; // Default
+}
+
 // ── Main Signal Generation ────────────────────────────────────────────────────
 
 export async function generateLiveSignals(existingPositions?: PositionInfo[]): Promise<LiveSignal[]> {
@@ -667,8 +835,12 @@ export async function generateLiveSignals(existingPositions?: PositionInfo[]): P
   const allSignals: LiveSignal[] = [];
 
   try {
-    // Fetch markets from all active series
-    const series = ["KXHIGHNY", "KXNBAGAME", "KXNBAPTS", "KXFEDRATE", "KXCPI", "KXINX", "KXNFLGAME", "KXGDP"];
+    // Fetch markets from all active series (#2: diversified beyond weather)
+    const series = [
+      "KXHIGHNY", "KXNBAGAME", "KXNBAPTS", "KXFEDRATE",
+      "KXCPI", "KXINX", "KXNFLGAME", "KXGDP",
+      "KXBTC", "KXETH", "KXAPPROVAL", "KXUNEM",
+    ];
 
     const allMarkets: KalshiMarket[] = [];
     await Promise.all(series.map(async (s) => {
@@ -677,6 +849,14 @@ export async function generateLiveSignals(existingPositions?: PositionInfo[]): P
     }));
 
     console.log(`[Signal Engine] Fetched ${allMarkets.length} live markets`);
+
+    // Group markets by event for intra-market arbitrage analysis
+    const marketsByEvent: Record<string, KalshiMarket[]> = {};
+    for (const m of allMarkets) {
+      const ev = m.event_ticker;
+      if (!marketsByEvent[ev]) marketsByEvent[ev] = [];
+      marketsByEvent[ev].push(m);
+    }
 
     // Run bias analyzers on each market
     for (const market of allMarkets) {
@@ -689,11 +869,22 @@ export async function generateLiveSignals(existingPositions?: PositionInfo[]): P
       const structureSignal = analyzeMarketStructure(market);
       if (structureSignal) allSignals.push(structureSignal);
 
+      // Edge #8: Stale pricing detection
+      const stalePriceSignal = analyzeStalePrice(market);
+      if (stalePriceSignal) allSignals.push(stalePriceSignal);
+
       // Run risk exit analysis if we have positions
       if (existingPositions && existingPositions.length > 0) {
         const exitSignals = analyzeRiskExits(market, existingPositions);
         allSignals.push(...exitSignals);
       }
+    }
+
+    // Edge #7: Intra-market arbitrage (requires grouped markets)
+    const arbSignals = analyzeIntraMarketArbitrage(marketsByEvent);
+    allSignals.push(...arbSignals);
+    if (arbSignals.length > 0) {
+      console.log(`[Signal Engine] Found ${arbSignals.length} intra-market arbitrage opportunities`);
     }
 
     // Run weather model analysis

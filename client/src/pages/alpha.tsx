@@ -68,7 +68,7 @@ const EDGES_INITIAL = [
     summary: "GFS 31-member ensemble from Open-Meteo (free). NOAA METAR for same-day temperature. 6 brackets per contract (2 wide outer, 4 inner ~2°F each). 5-day forecasts ~90% accurate, 7-day ~80%.",
     dataSource: "Open-Meteo GFS ensemble, NOAA METAR API",
     strategy: "Fetch GFS ensemble probability distribution for each weather bracket. Bet when model edge > 5% vs market implied probability.",
-    status: "Configured",
+    status: "Active",
   },
   {
     id: 6,
