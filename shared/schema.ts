@@ -175,6 +175,15 @@ export const settings = sqliteTable("settings", {
   scanFrequency: integer("scan_frequency").notNull().default(30),
   llmModel: text("llm_model").notNull().default("gpt-4o"),
   updatedAt: text("updated_at").notNull(),
+  // Bot mode system
+  botMode: text("bot_mode").notNull().default("hitl"), // 'hitl' | 'supervised' | 'autonomous' | 'halted'
+  dailyLossLimit: real("daily_loss_limit").notNull().default(500),
+  maxDrawdownLimit: real("max_drawdown_limit").notNull().default(20),
+  autonomousConfirmedAt: text("autonomous_confirmed_at"),
+  autoMinEdge: real("auto_min_edge").notNull().default(5),
+  autoMinConfidence: real("auto_min_confidence").notNull().default(75),
+  autoMaxContracts: integer("auto_max_contracts").notNull().default(50),
+  autoMaxCost: real("auto_max_cost").notNull().default(50),
 });
 
 export const insertSettingsSchema = createInsertSchema(settings).omit({ id: true });
@@ -205,6 +214,11 @@ export const pendingTrades = sqliteTable("pending_trades", {
   executedAt: text("executed_at"),
   orderId: text("order_id"),
   errorMessage: text("error_message"),
+  // Gap detection fields
+  gapType: text("gap_type"), // 'A' | 'B' | 'C' | 'D' | 'E'
+  executableEdge: real("executable_edge"),
+  kellySize: real("kelly_size"),
+  autoExecuted: integer("auto_executed", { mode: "boolean" }).notNull().default(false),
 });
 
 export const insertPendingTradeSchema = createInsertSchema(pendingTrades).omit({ id: true });

@@ -3,7 +3,7 @@ import { useHashLocation } from "wouter/use-hash-location";
 import {
   LayoutDashboard, TrendingUp, Zap, ShoppingCart, Briefcase,
   Shield, FlaskConical, ClipboardList, Settings, Activity,
-  ChevronRight, Sparkles, User
+  ChevronRight, Sparkles, User, Bot
 } from "lucide-react";
 import {
   Sidebar, SidebarContent, SidebarGroup, SidebarGroupContent,
@@ -25,11 +25,12 @@ const navItems = [
   { title: "Compliance", url: "/compliance", icon: ClipboardList, group: "Management" },
   { title: "Human in the Loop", url: "/hitl", icon: User, group: "Trading" },
   { title: "Alpha Edges", url: "/alpha", icon: Sparkles, group: "Strategy" },
+  { title: "Bot Control", url: "/autonomous", icon: Bot, group: "Autonomous" },
   { title: "Settings", url: "/settings", icon: Settings, group: "System" },
 ];
 
 // Preserve group order
-const GROUP_ORDER = ["Overview", "Trading", "Management", "Strategy", "System"];
+const GROUP_ORDER = ["Overview", "Trading", "Management", "Strategy", "Autonomous", "System"];
 
 const grouped = navItems.reduce((acc, item) => {
   if (!acc[item.group]) acc[item.group] = [];
@@ -45,8 +46,15 @@ export function AppSidebar() {
     refetchInterval: 30000,
   });
 
+  const { data: botStatusData } = useQuery({
+    queryKey: ["/api/bot/status"],
+    refetchInterval: 10000,
+  });
+
   const portfolio = (portfolioData as any)?.portfolio;
   const botStatus = portfolio?.botStatus || "stopped";
+  const botMode = (botStatusData as any)?.mode || "hitl";
+  const isHalted = botMode === "halted";
 
   const statusColor =
     botStatus === "running" ? "text-profit" :

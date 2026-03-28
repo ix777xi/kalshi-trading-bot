@@ -17,7 +17,8 @@ import {
 } from "@/components/ui/alert-dialog";
 import { useState, useEffect } from "react";
 import { useToast } from "@/hooks/use-toast";
-import { Save, Play, Pause, Square, Key, Bell, Bot, Cpu, Wifi, WifiOff, TestTube, Trash2, CheckCircle2, XCircle, Sliders, AlertOctagon } from "lucide-react";
+import { Save, Play, Pause, Square, Key, Bell, Bot, Cpu, Wifi, WifiOff, TestTube, Trash2, CheckCircle2, XCircle, Sliders, AlertOctagon, Radio, ExternalLink } from "lucide-react";
+import { useLocation } from "wouter";
 
 type Settings = {
   id: number; kalshiApiKey: string; kalshiApiKeyId: string;
@@ -40,6 +41,7 @@ type ConnectionStatus = "idle" | "testing" | "connected" | "failed";
 
 export default function SettingsPage() {
   const { toast } = useToast();
+  const [, setLocation] = useLocation();
 
   const { data: settings, isLoading: sLoading } = useQuery<Settings>({
     queryKey: ["/api/settings"],
@@ -89,10 +91,24 @@ export default function SettingsPage() {
     mutationFn: (data: Partial<BotConfig>) => apiRequest("PUT", "/api/bot/config", data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/bot/config"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/bot/status"] });
       toast({ title: "Bot config saved", description: "Signal scanner thresholds updated." });
     },
     onError: (e: any) => {
       toast({ title: "Save failed", description: e?.message, variant: "destructive" });
+    },
+  });
+
+  const setModeMutation = useMutation({
+    mutationFn: (data: { mode: string; confirmation?: string }) =>
+      apiRequest("POST", "/api/bot/mode", data),
+    onSuccess: (_, vars) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/bot/config"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/bot/status"] });
+      toast({ title: `Mode set to ${vars.mode.toUpperCase()}` });
+    },
+    onError: (e: any) => {
+      toast({ title: "Mode change failed", description: e?.message, variant: "destructive" });
     },
   });
 
@@ -386,6 +402,99 @@ export default function SettingsPage() {
             <Save className="w-3.5 h-3.5 mr-1.5" />
             {saveBotConfig.isPending ? "Saving..." : "Save Bot Configuration"}
           </Button>
+        </CardContent>
+      </Card>
+
+      {/* Bot Trading Mode */}
+      <Card>
+        <CardHeader className="p-4 pb-2 flex flex-row items-center gap-2">
+          <Radio className="w-4 h-4 text-primary" />
+          <CardTitle className="text-sm font-medium">Bot Trading Mode</CardTitle>
+          <Badge
+            variant="outline"
+            className={`ml-auto text-xs ${
+              (botConfig?.botMode || "hitl") === "autonomous" ? "text-profit border-profit/40" :
+              (botConfig?.botMode || "hitl") === "supervised" ? "text-amber-400 border-amber-500/40" :
+              (botConfig?.botMode || "hitl") === "halted" ? "text-loss border-loss/40" :
+              "text-muted-foreground"
+            }`}
+          >
+            {(botConfig?.botMode || "hitl").toUpperCase()}
+          </Badge>
+        </CardHeader>
+        <CardContent className="p-4 pt-0 space-y-3">
+          <p className="text-xs text-muted-foreground">
+            Choose how the bot handles trade execution. Upgrade to autonomous mode on the Bot Control page.
+          </p>
+
+          {/* Mode options (radio-style) */}
+          {[
+            {
+              value: "hitl",
+              label: "Human in the Loop",
+              desc: "Bot finds trades, you approve each one",
+              color: "text-blue-400",
+            },
+            {
+              value: "supervised",
+              label: "Supervised Auto",
+              desc: "Bot auto-executes high-confidence trades, queues others for approval",
+              color: "text-amber-400",
+            },
+            {
+              value: "autonomous",
+              label: "Full Autonomous",
+              desc: "Bot executes all qualifying trades. Redirects to Bot Control for setup",
+              color: "text-profit",
+            },
+          ].map((opt) => {
+            const isActive = (botConfig?.botMode || "hitl") === opt.value;
+            return (
+              <div
+                key={opt.value}
+                onClick={() => {
+                  if (opt.value === "autonomous") {
+                    setLocation("/autonomous");
+                    return;
+                  }
+                  if (!isActive) {
+                    if (opt.value === "supervised") {
+                      setModeMutation.mutate({ mode: "supervised" });
+                    } else {
+                      saveBotConfig.mutate({ botMode: opt.value });
+                    }
+                  }
+                }}
+                data-testid={`mode-option-${opt.value}`}
+                className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-all ${
+                  isActive
+                    ? `border-primary/30 bg-primary/5`
+                    : "border-border/40 hover:border-border/70 hover:bg-muted/10"
+                }`}
+              >
+                <div className={`w-4 h-4 rounded-full border-2 shrink-0 mt-0.5 flex items-center justify-center ${
+                  isActive ? "border-primary" : "border-muted-foreground/40"
+                }`}>
+                  {isActive && <div className="w-2 h-2 rounded-full bg-primary" />}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className={`text-xs font-medium flex items-center gap-1.5 ${isActive ? opt.color : "text-foreground"}`}>
+                    {opt.label}
+                    {opt.value === "autonomous" && <ExternalLink className="w-3 h-3" />}
+                  </div>
+                  <div className="text-[10px] text-muted-foreground mt-0.5">{opt.desc}</div>
+                </div>
+                {isActive && <Badge variant="outline" className={`text-[9px] shrink-0 ${opt.color} border-current/30`}>Active</Badge>}
+              </div>
+            );
+          })}
+
+          {(botConfig?.botMode || "hitl") === "halted" && (
+            <div className="flex items-center gap-2 p-3 rounded-lg bg-loss/10 border border-loss/20 text-xs text-loss">
+              <AlertOctagon className="w-4 h-4 shrink-0" />
+              <span>Bot is HALTED. Go to <a href="#/autonomous" className="underline">Bot Control</a> to restart.</span>
+            </div>
+          )}
         </CardContent>
       </Card>
 

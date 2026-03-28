@@ -16,12 +16,37 @@ import Compliance from "@/pages/compliance";
 import SettingsPage from "@/pages/settings";
 import Alpha from "@/pages/alpha";
 import HumanInTheLoop from "@/pages/hitl";
+import AutonomousPage from "@/pages/autonomous";
 import { SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/app-sidebar";
 import { useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { ShieldAlert } from "lucide-react";
 
 type Settings = { hasPrivateKey: boolean };
+type BotStatus = { mode: string; isHalted: boolean };
+
+function HaltedBanner() {
+  const { data: botStatus } = useQuery<BotStatus>({
+    queryKey: ["/api/bot/status"],
+    refetchInterval: 5000,
+  });
+
+  if (!botStatus?.isHalted) return null;
+
+  return (
+    <div
+      className="flex items-center gap-2 px-4 py-2 bg-loss text-white text-xs font-medium shrink-0"
+      data-testid="banner-bot-halted"
+    >
+      <ShieldAlert className="w-4 h-4 shrink-0" />
+      <span>
+        <strong>BOT HALTED</strong> — Emergency shutdown triggered. All trading stopped.{" "}
+        <a href="#/autonomous" className="underline font-semibold hover:text-white/80">Go to Bot Control to restart.</a>
+      </span>
+    </div>
+  );
+}
 
 function AppRouter() {
   return (
@@ -34,6 +59,7 @@ function AppRouter() {
       <Route path="/risk" component={Risk} />
       <Route path="/alpha" component={Alpha} />
       <Route path="/hitl" component={HumanInTheLoop} />
+      <Route path="/autonomous" component={AutonomousPage} />
       <Route path="/backtest" component={Backtest} />
       <Route path="/compliance" component={Compliance} />
       <Route path="/settings" component={SettingsPage} />
@@ -86,6 +112,7 @@ function App() {
             <div className="flex h-screen w-full bg-background overflow-hidden">
               <AppSidebar />
               <div className="flex flex-col flex-1 min-w-0">
+                <HaltedBanner />
                 <header className="flex items-center gap-2 h-11 px-4 border-b border-border bg-card/50 shrink-0">
                   <SidebarTrigger data-testid="button-sidebar-toggle" className="h-7 w-7" />
                   <div className="flex-1" />

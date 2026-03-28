@@ -4,7 +4,7 @@ import { createServer, type Server } from "http";
 import { storage, db, sqlite } from "./storage";
 import {
   positions, orders, signals, agents, portfolio, pnlHistory,
-  riskConfig, auditLog, backtestResults, equityCurve, settings,
+  riskConfig, auditLog, backtestResults, equityCurve, settings, pendingTrades,
 } from "@shared/schema";
 import { generateLiveSignals, type PositionInfo } from "./signal-engine";
 
@@ -750,13 +750,16 @@ export async function registerRoutes(
   // ── Bot Config ────────────────────────────────────────────────────────────
   app.get("/api/bot/config", async (_req, res) => {
     const s = await storage.getSettings();
-    if (!s) return res.json({ botMode: "hitl", autoMinEdge: 5, autoMinConfidence: 75, autoMaxContracts: 50, autoMaxCost: 50 });
+    if (!s) return res.json({ botMode: "hitl", autoMinEdge: 5, autoMinConfidence: 75, autoMaxContracts: 50, autoMaxCost: 50, dailyLossLimit: 500, maxDrawdownLimit: 20 });
     res.json({
       botMode: (s as any).botMode || "hitl",
       autoMinEdge: (s as any).autoMinEdge ?? 5,
       autoMinConfidence: (s as any).autoMinConfidence ?? 75,
       autoMaxContracts: (s as any).autoMaxContracts ?? 50,
       autoMaxCost: (s as any).autoMaxCost ?? 50,
+      dailyLossLimit: (s as any).dailyLossLimit ?? 500,
+      maxDrawdownLimit: (s as any).maxDrawdownLimit ?? 20,
+      autonomousConfirmedAt: (s as any).autonomousConfirmedAt || null,
     });
   });
 
@@ -764,7 +767,13 @@ export async function registerRoutes(
     try {
       const { botMode, autoMinEdge, autoMinConfidence, autoMaxContracts, autoMaxCost } = req.body;
       const update: any = {};
-      if (botMode !== undefined) update.botMode = botMode;
+      if (botMode !== undefined) {
+        // Don't allow direct mode switch to autonomous via this endpoint (requires confirmation)
+        if (botMode === "autonomous") {
+          return res.status(400).json({ error: "Use POST /api/bot/mode to enable autonomous mode (requires confirmation)" });
+        }
+        update.botMode = botMode;
+      }
       if (autoMinEdge !== undefined) update.autoMinEdge = parseFloat(autoMinEdge);
       if (autoMinConfidence !== undefined) update.autoMinConfidence = parseFloat(autoMinConfidence);
       if (autoMaxContracts !== undefined) update.autoMaxContracts = parseInt(autoMaxContracts);
@@ -776,26 +785,224 @@ export async function registerRoutes(
     }
   });
 
-  // ── Background Signal Scanner ─────────────────────────────────────────────
-  setInterval(async () => {
+
+  // ── In-memory bot state (for emergency halt) ─────────────────────────────────
+  let botStartTime = Date.now();
+  let consecutiveFailures = 0;
+
+  // ── Bot Status API ────────────────────────────────────────────────────────────
+  app.get("/api/bot/status", async (_req, res) => {
     try {
-      console.log("[Auto-Scanner] Running signal scan...");
-      const signals = await getCachedSignals();
+      const s = await storage.getSettings();
+      const mode = (s as any)?.botMode || "hitl";
+      const isHalted = mode === "halted";
+      const uptimeMs = Date.now() - botStartTime;
+      const uptimeMins = Math.floor(uptimeMs / 60_000);
+
+      const today = new Date().toISOString().slice(0, 10);
+      const allTrades = await storage.getPendingTrades();
+      const todayExecuted = allTrades.filter(
+        (t: any) => (t.status === "executed") && (t.executedAt || t.createdAt || "").startsWith(today)
+      );
+      const autoToday = todayExecuted.filter((t: any) => t.autoExecuted);
+      const tradesToday = todayExecuted.length;
+
+      // Win rate: last 20 executed trades (profit = maxProfit, loss = estimatedCost negative)
+      const last20 = allTrades.filter((t: any) => t.status === "executed").slice(0, 20);
+      const wins = last20.filter((t: any) => (t.edgeScore || 0) > 0).length;
+      const winRate = last20.length > 0 ? Math.round((wins / last20.length) * 100) : 0;
+
+      // Daily P&L estimate
+      const dailyPnl = await storage.getDailyPnl();
+
+      res.json({
+        mode,
+        isHalted,
+        uptime: `${Math.floor(uptimeMins / 60)}h ${uptimeMins % 60}m`,
+        uptimeMs,
+        tradesToday,
+        autoToday: autoToday.length,
+        dailyPnl: parseFloat(dailyPnl.toFixed(2)),
+        winRate,
+        consecutiveFailures,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ── Emergency Halt ────────────────────────────────────────────────────────────
+  app.post("/api/bot/emergency-halt", async (_req, res) => {
+    try {
+      // Set halted state immediately (works even if API call fails)
+      await storage.setBotMode("halted");
+      await storage.updateBotStatus("stopped");
+
+      // Try to cancel all live orders
+      let cancelResult = { ok: false, message: "API not configured" };
+      try {
+        const result = await kalshiAuthFetch("DELETE", "/portfolio/orders");
+        cancelResult = { ok: result.ok, message: result.ok ? "All orders cancelled" : JSON.stringify(result.data) };
+      } catch (e: any) {
+        cancelResult = { ok: false, message: e.message };
+      }
+
+      // Log the emergency halt
+      await storage.createAuditLog({
+        eventType: "BOT_CONTROL",
+        ticker: null,
+        description: `EMERGENCY HALT triggered. Orders cancel: ${cancelResult.message}`,
+        amount: null,
+        status: "warning",
+        createdAt: new Date().toISOString(),
+      });
+
+      res.json({
+        success: true,
+        mode: "halted",
+        cancelResult,
+        message: "Bot halted. All trading stopped.",
+      });
+    } catch (e: any) {
+      // Even if there's an error, try to set halted state
+      try { await storage.setBotMode("halted"); } catch {}
+      res.status(500).json({ error: e.message, halted: true });
+    }
+  });
+
+  // ── Set Bot Mode ──────────────────────────────────────────────────────────────
+  app.post("/api/bot/mode", async (req, res) => {
+    try {
+      const { mode, confirmation, dailyLossLimit, maxDrawdownLimit } = req.body;
+
+      if (!["hitl", "supervised", "autonomous", "halted"].includes(mode)) {
+        return res.status(400).json({ error: "Invalid mode" });
+      }
+
+      // Autonomous requires confirmation phrase
+      if (mode === "autonomous") {
+        if (confirmation !== "I CONFIRM AUTONOMOUS MODE") {
+          return res.status(400).json({ error: "Confirmation phrase required to enable autonomous mode" });
+        }
+        const s = await storage.getSettings();
+        if (!(s as any)?.kalshiPrivateKey?.trim()) {
+          return res.status(400).json({ error: "API key must be configured before enabling autonomous mode" });
+        }
+      }
+
+      const update: any = { botMode: mode };
+      if (mode === "autonomous") {
+        update.autonomousConfirmedAt = new Date().toISOString();
+        if (dailyLossLimit !== undefined) update.dailyLossLimit = parseFloat(dailyLossLimit);
+        if (maxDrawdownLimit !== undefined) update.maxDrawdownLimit = parseFloat(maxDrawdownLimit);
+      }
+
+      await storage.updateSettings(update);
+
+      await storage.createAuditLog({
+        eventType: "BOT_CONTROL",
+        ticker: null,
+        description: `Bot mode changed to ${mode.toUpperCase()}${mode === "autonomous" ? " (autonomous confirmed)" : ""}`,
+        amount: null,
+        status: "ok",
+        createdAt: new Date().toISOString(),
+      });
+
+      res.json({ success: true, mode });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ── Restart from Halted ───────────────────────────────────────────────────────
+  app.post("/api/bot/restart", async (req, res) => {
+    try {
+      const { confirmation } = req.body;
+      if (confirmation !== "RESTART BOT") {
+        return res.status(400).json({ error: "Confirmation required: send { confirmation: 'RESTART BOT' }" });
+      }
+
+      await storage.setBotMode("hitl");
+      await storage.updateBotStatus("running");
+      consecutiveFailures = 0;
+
+      await storage.createAuditLog({
+        eventType: "BOT_CONTROL",
+        ticker: null,
+        description: "Bot restarted from HALTED state — mode set to HITL",
+        amount: null,
+        status: "ok",
+        createdAt: new Date().toISOString(),
+      });
+
+      res.json({ success: true, mode: "hitl" });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ── Background Signal Scanner ─────────────────────────────────────────────
+  async function runSignalScan(isInitial = false) {
+    try {
       const settingsData = await storage.getSettings();
+      const mode = (settingsData as any)?.botMode || "hitl";
+      
+      // Don't scan if halted
+      if (mode === "halted") {
+        console.log("[Auto-Scanner] Bot is HALTED — skipping scan");
+        return;
+      }
+
+      console.log(`[Auto-Scanner] Running scan (mode=${mode})...`);
+      const liveSignals = await getCachedSignals();
       const minEdge = (settingsData as any)?.autoMinEdge ?? 5;
       const minConf = (settingsData as any)?.autoMinConfidence ?? 75;
       const maxContracts = (settingsData as any)?.autoMaxContracts ?? 50;
       const maxCost = (settingsData as any)?.autoMaxCost ?? 50;
+      const dailyLossLimit = (settingsData as any)?.dailyLossLimit ?? 500;
+
+      // Emergency halt check: daily P&L
+      const dailyPnl = await storage.getDailyPnl();
+      if (Math.abs(dailyPnl) > dailyLossLimit) {
+        console.log(`[Auto-Scanner] Daily loss limit hit ($${Math.abs(dailyPnl).toFixed(2)} > $${dailyLossLimit}) — triggering emergency halt`);
+        await storage.setBotMode("halted");
+        await storage.createAuditLog({
+          eventType: "BOT_CONTROL",
+          ticker: null,
+          description: `AUTO-HALT: Daily loss limit exceeded ($${Math.abs(dailyPnl).toFixed(2)} > $${dailyLossLimit})`,
+          amount: Math.abs(dailyPnl),
+          status: "warning",
+          createdAt: new Date().toISOString(),
+        });
+        return;
+      }
+
+      // Emergency halt check: consecutive failures
+      if (consecutiveFailures >= 3) {
+        console.log(`[Auto-Scanner] 3+ consecutive failures — triggering emergency halt`);
+        await storage.setBotMode("halted");
+        await storage.createAuditLog({
+          eventType: "BOT_CONTROL",
+          ticker: null,
+          description: "AUTO-HALT: 3+ consecutive API/execution failures",
+          amount: null,
+          status: "warning",
+          createdAt: new Date().toISOString(),
+        });
+        consecutiveFailures = 0;
+        return;
+      }
 
       const existing = await storage.getPendingTrades("pending");
       const existingTickers = new Set(existing.map((t: any) => t.ticker));
 
-      for (const sig of signals) {
+      for (const sig of liveSignals) {
         if (existingTickers.has(sig.ticker)) continue;
         if (sig.signalType === "NO_TRADE") continue;
 
         const isSell = sig.signalType.startsWith("SELL");
-        // SELL signals bypass edge/confidence thresholds — risk exits are always surfaced
+
+        // For non-sell signals, check edge/confidence thresholds
         if (!isSell) {
           if (Math.abs(sig.edgeScore) < minEdge) continue;
           if (sig.modelConfidence * 100 < minConf) continue;
@@ -808,11 +1015,49 @@ export async function registerRoutes(
           ? 50
           : Math.min(maxContracts, Math.max(1, Math.floor(maxCost / Math.max(sig.marketPrice, 0.01))));
         const estimatedCost = parseFloat((contracts * sig.marketPrice).toFixed(2));
-        const maxProfit = isSell
-          ? estimatedCost
-          : parseFloat((contracts * (1 - sig.marketPrice)).toFixed(2));
+        const maxProfit = isSell ? estimatedCost : parseFloat((contracts * (1 - sig.marketPrice)).toFixed(2));
 
-        await storage.createPendingTrade({
+        // Supervised auto: check if meets auto-execution criteria
+        const meetsAutoSupervisedCriteria = (
+          !isSell &&
+          (sig.executableEdge || 0) >= 0.08 &&
+          sig.modelConfidence >= 0.80 &&
+          estimatedCost <= 50 &&
+          (sig.spread || 0) <= 0.06
+        );
+
+        let tradeStatus = "pending";
+        let autoExecuted = false;
+
+        if (mode === "supervised" && meetsAutoSupervisedCriteria) {
+          // Auto-execute immediately
+          const execResult = await autoExecuteTrade(sig.ticker, side, action, contracts, priceCents);
+          if (execResult.ok) {
+            tradeStatus = "executed";
+            autoExecuted = true;
+            consecutiveFailures = 0;
+            console.log(`[Supervised] Auto-executed: ${sig.ticker} (${side}) edge=${sig.edgeScore.toFixed(1)}%`);
+          } else {
+            consecutiveFailures++;
+            console.log(`[Supervised] Auto-execute failed: ${sig.ticker} — ${execResult.error}`);
+            // Fall through to pending
+          }
+        } else if (mode === "autonomous") {
+          // Execute ALL signals that passed guardrails
+          const execResult = await autoExecuteTrade(sig.ticker, side, action, contracts, priceCents);
+          if (execResult.ok) {
+            tradeStatus = "executed";
+            autoExecuted = true;
+            consecutiveFailures = 0;
+            console.log(`[Autonomous] Auto-executed: ${sig.ticker} (${side}) edge=${sig.edgeScore.toFixed(1)}%`);
+          } else {
+            consecutiveFailures++;
+            console.log(`[Autonomous] Auto-execute failed: ${sig.ticker} — ${execResult.error}`);
+            tradeStatus = "failed";
+          }
+        }
+
+        const trade = await storage.createPendingTrade({
           ticker: sig.ticker,
           title: sig.title,
           side,
@@ -828,75 +1073,83 @@ export async function registerRoutes(
           modelName: sig.modelName,
           edgeSource: sig.edgeSource,
           reasoning: sig.reasoning,
-          status: "pending",
+          status: tradeStatus,
           createdAt: new Date().toISOString(),
-          decidedAt: null,
-          executedAt: null,
+          decidedAt: autoExecuted ? new Date().toISOString() : null,
+          executedAt: autoExecuted ? new Date().toISOString() : null,
           orderId: null,
           errorMessage: null,
+          gapType: sig.gapType || null,
+          executableEdge: sig.executableEdge || null,
+          kellySize: sig.kellySize || null,
+          autoExecuted,
         });
-        console.log(`[Auto-Scanner] Queued trade: ${sig.ticker} (${side}) edge=${sig.edgeScore.toFixed(1)}%`);
+
+        // Log auto-executed trades to audit log
+        if (autoExecuted) {
+          await storage.createAuditLog({
+            eventType: "ORDER_PLACED",
+            ticker: sig.ticker,
+            description: `[AUTO-${mode.toUpperCase()}] ${action.toUpperCase()} ${side.toUpperCase()} ${contracts} @ ${priceCents}¢ | Edge: ${sig.edgeScore.toFixed(1)}% | Gap: ${sig.gapType || "?"}`,
+            amount: estimatedCost,
+            status: "ok",
+            createdAt: new Date().toISOString(),
+          });
+        }
+
+        console.log(`[Auto-Scanner] ${autoExecuted ? "Executed" : "Queued"}: ${sig.ticker} (${side}) edge=${sig.edgeScore.toFixed(1)}%`);
       }
     } catch (e) {
       console.error("[Auto-Scanner] Error:", e);
+      consecutiveFailures++;
     }
-  }, 60_000);
+  }
+
+  // Helper: auto-execute a trade via Kalshi API
+  async function autoExecuteTrade(
+    ticker: string,
+    side: string,
+    action: string,
+    contracts: number,
+    priceCents: number
+  ): Promise<{ ok: boolean; orderId?: string; error?: string }> {
+    try {
+      const creds = await getKalshiCredentials();
+      if (!creds) return { ok: false, error: "No API credentials configured" };
+
+      const orderBody: any = {
+        ticker,
+        side,
+        action,
+        count: contracts,
+        type: "limit",
+        client_order_id: randomUUID(),
+        post_only: action !== "sell",
+        ...(action === "sell" ? { reduce_only: true } : {}),
+      };
+      if (side === "yes") {
+        orderBody.yes_price = priceCents;
+      } else {
+        orderBody.no_price = 100 - priceCents;
+      }
+
+      const result = await kalshiAuthFetch("POST", "/portfolio/orders", orderBody);
+      if (result.ok) {
+        const orderId = (result.data as any)?.order?.order_id || (result.data as any)?.order_id || "unknown";
+        return { ok: true, orderId };
+      } else {
+        const errMsg = (result.data as any)?.detail || (result.data as any)?.error || JSON.stringify(result.data);
+        return { ok: false, error: errMsg };
+      }
+    } catch (e: any) {
+      return { ok: false, error: e.message };
+    }
+  }
+
+  setInterval(() => runSignalScan(), 60_000);
 
   // Kick off initial scan after 5 seconds (so server is fully up)
-  setTimeout(async () => {
-    try {
-      console.log("[Auto-Scanner] Initial scan...");
-      const signals = await getCachedSignals();
-      const settingsData = await storage.getSettings();
-      const minEdge = (settingsData as any)?.autoMinEdge ?? 5;
-      const minConf = (settingsData as any)?.autoMinConfidence ?? 75;
-      const maxContracts = (settingsData as any)?.autoMaxContracts ?? 50;
-      const maxCost = (settingsData as any)?.autoMaxCost ?? 50;
-
-      const existing = await storage.getPendingTrades("pending");
-      const existingTickers = new Set(existing.map((t: any) => t.ticker));
-
-      for (const sig of signals) {
-        if (existingTickers.has(sig.ticker)) continue;
-        if (Math.abs(sig.edgeScore) < minEdge) continue;
-        if (sig.modelConfidence * 100 < minConf) continue;
-        if (sig.signalType === "NO_TRADE") continue;
-
-        const side = sig.signalType === "BUY_YES" ? "yes" : "no";
-        const priceCents = Math.round(sig.marketPrice * 100);
-        const contracts = Math.min(maxContracts, Math.max(1, Math.floor(maxCost / sig.marketPrice)));
-        const estimatedCost = parseFloat((contracts * sig.marketPrice).toFixed(2));
-        const maxProfit = parseFloat((contracts * (1 - sig.marketPrice)).toFixed(2));
-
-        await storage.createPendingTrade({
-          ticker: sig.ticker,
-          title: sig.title,
-          side,
-          action: "buy",
-          contracts,
-          priceCents,
-          estimatedCost,
-          maxProfit,
-          edgeScore: sig.edgeScore,
-          trueProbability: sig.trueProbability,
-          marketPrice: sig.marketPrice,
-          modelConfidence: sig.modelConfidence,
-          modelName: sig.modelName,
-          edgeSource: sig.edgeSource,
-          reasoning: sig.reasoning,
-          status: "pending",
-          createdAt: new Date().toISOString(),
-          decidedAt: null,
-          executedAt: null,
-          orderId: null,
-          errorMessage: null,
-        });
-      }
-      console.log(`[Auto-Scanner] Initial scan complete: ${signals.length} signals processed`);
-    } catch (e) {
-      console.error("[Auto-Scanner] Initial scan error:", e);
-    }
-  }, 5_000);
+  setTimeout(() => runSignalScan(true), 5_000);
 
   return httpServer;
 }
@@ -1064,4 +1317,14 @@ function sqlite_migrate() {
   try { sqlite.exec("ALTER TABLE settings ADD COLUMN auto_min_confidence REAL NOT NULL DEFAULT 75"); } catch {}
   try { sqlite.exec("ALTER TABLE settings ADD COLUMN auto_max_contracts INTEGER NOT NULL DEFAULT 50"); } catch {}
   try { sqlite.exec("ALTER TABLE settings ADD COLUMN auto_max_cost REAL NOT NULL DEFAULT 50"); } catch {}
+  // Bot mode columns
+  try { sqlite.exec("ALTER TABLE settings ADD COLUMN bot_mode TEXT NOT NULL DEFAULT 'hitl'"); } catch {}
+  try { sqlite.exec("ALTER TABLE settings ADD COLUMN daily_loss_limit REAL NOT NULL DEFAULT 500"); } catch {}
+  try { sqlite.exec("ALTER TABLE settings ADD COLUMN max_drawdown_limit REAL NOT NULL DEFAULT 20"); } catch {}
+  try { sqlite.exec("ALTER TABLE settings ADD COLUMN autonomous_confirmed_at TEXT"); } catch {}
+  // Pending trades gap detection columns
+  try { sqlite.exec("ALTER TABLE pending_trades ADD COLUMN gap_type TEXT"); } catch {}
+  try { sqlite.exec("ALTER TABLE pending_trades ADD COLUMN executable_edge REAL"); } catch {}
+  try { sqlite.exec("ALTER TABLE pending_trades ADD COLUMN kelly_size REAL"); } catch {}
+  try { sqlite.exec("ALTER TABLE pending_trades ADD COLUMN auto_executed INTEGER NOT NULL DEFAULT 0"); } catch {}
 }

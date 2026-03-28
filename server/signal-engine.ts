@@ -28,6 +28,12 @@ export interface LiveSignal {
   reasoning: string;
   riskLevel: "low" | "medium" | "high" | "critical";
   createdAt: string;
+  // Gap detection fields (5-step framework)
+  gapType: "A" | "B" | "C" | "D" | "E"; // A=Stale, B=ThinLiquidity, C=CrossPlatform, D=ProbDistortion, E=EventCatalyst
+  spread: number;           // yes_ask - yes_bid
+  executableEdge: number;   // theoretical_edge - spread/2
+  liquidityDepth: number;   // contracts available at best bid/ask (estimated)
+  kellySize: number;        // half-kelly position size in dollars
 }
 
 interface KalshiMarket {
@@ -70,6 +76,67 @@ async function fetchKalshiMarkets(seriesTicker: string): Promise<KalshiMarket[]>
 // Research: 5¢ contracts win only 4.18% (implied 5%) = -16.36% mispricing
 // Contracts above 80¢ consistently outperform
 
+// ── Hardcoded Risk Guardrails ─────────────────────────────────────────────────
+const BANKROLL = 10_000; // Default bankroll estimate for Kelly sizing
+const MIN_DEPTH = 48;    // Minimum liquidity depth (HARDCODED, never override)
+const MIN_EXEC_EDGE = 0.04; // Minimum executable edge (HARDCODED)
+const MAX_PER_MARKET = 500; // $500 hard cap per market (HARDCODED)
+
+/**
+ * Classify gap type based on market characteristics
+ */
+function classifyGapType(
+  market: KalshiMarket,
+  spread: number,
+  edgeSource: string
+): "A" | "B" | "C" | "D" | "E" {
+  const oi = parseFloat(market.open_interest_fp || "0");
+  const closeTime = market.close_time ? new Date(market.close_time).getTime() : Infinity;
+  const hoursToClose = (closeTime - Date.now()) / 3_600_000;
+
+  // Type D: Probability Distortion — longshot/YES-NO asymmetry
+  if (edgeSource === "favorite_longshot_bias" || edgeSource === "yes_no_asymmetry") {
+    return "D";
+  }
+  // Type E: Event Catalyst — close time within 48 hours
+  if (hoursToClose > 0 && hoursToClose <= 48) {
+    return "E";
+  }
+  // Type B: Thin Liquidity — OI < 5000 and spread > 0.05
+  if (oi < 5000 && spread > 0.05) {
+    return "B";
+  }
+  // Type A: Stale Pricing — weather model vs crowd
+  if (edgeSource === "weather_model") {
+    return "A";
+  }
+  // Default: Type C (cross-platform / spread structure)
+  return "C";
+}
+
+/**
+ * Compute executable edge and Kelly sizing (HARDCODED guardrails applied)
+ */
+function computeEdgeMetrics(
+  theoreticalEdge: number,
+  spread: number
+): { executableEdge: number; kellySize: number } {
+  const executableEdge = theoreticalEdge - spread / 2;
+  const fullKelly = executableEdge > 0 ? executableEdge / Math.max(1 - executableEdge, 0.01) : 0;
+  const halfKelly = fullKelly / 2;
+  const kellySize = Math.min(halfKelly * BANKROLL, MAX_PER_MARKET);
+  return { executableEdge: parseFloat(executableEdge.toFixed(4)), kellySize: parseFloat(kellySize.toFixed(2)) };
+}
+
+/**
+ * Estimate liquidity depth from market data
+ */
+function estimateLiquidityDepth(market: KalshiMarket): number {
+  const oi = parseFloat(market.open_interest_fp || "0");
+  const volume = parseFloat(market.volume_fp || "0");
+  return Math.max(0, Math.round(Math.min(oi * 0.08, volume * 0.5)));
+}
+
 function analyzeLongshotBias(market: KalshiMarket): LiveSignal | null {
   const yesBid = parseFloat(market.yes_bid_dollars || "0");
   const noBid = parseFloat(market.no_bid_dollars || "0");
@@ -108,6 +175,17 @@ function analyzeLongshotBias(market: KalshiMarket): LiveSignal | null {
   const signalType = biasEdge > 0 ? "BUY_YES" : "BUY_NO";
   const trueProbability = midPrice + biasEdge / 100;
 
+  const yesAsk = parseFloat(market.yes_ask_dollars || "0");
+  const spread = Math.max(0, yesAsk - (midPrice > 0 ? midPrice : 0));
+  const theoreticalEdge = biasEdge / 100;
+  const { executableEdge, kellySize } = computeEdgeMetrics(theoreticalEdge, spread);
+  const liquidityDepth = estimateLiquidityDepth(market);
+  const edgeSource = "favorite_longshot_bias";
+
+  // Risk guardrails (HARDCODED)
+  if (liquidityDepth < MIN_DEPTH) return null;
+  if (executableEdge < MIN_EXEC_EDGE) return null;
+
   return {
     ticker: market.ticker,
     title: market.title || market.ticker,
@@ -118,10 +196,15 @@ function analyzeLongshotBias(market: KalshiMarket): LiveSignal | null {
     signalType,
     modelConfidence: midPrice <= 0.10 ? 0.88 : midPrice <= 0.20 ? 0.82 : 0.72,
     modelName: "Longshot-Bias-Model",
-    edgeSource: "favorite_longshot_bias",
+    edgeSource,
     reasoning,
     riskLevel: midPrice <= 0.05 ? "high" : midPrice <= 0.15 ? "medium" : "low",
     createdAt: new Date().toISOString(),
+    gapType: classifyGapType(market, spread, edgeSource),
+    spread: parseFloat(spread.toFixed(4)),
+    executableEdge,
+    liquidityDepth,
+    kellySize,
   };
 }
 
@@ -151,6 +234,18 @@ function analyzeYesNoAsymmetry(market: KalshiMarket): LiveSignal | null {
 
   if (noEdge < 1.0) return null;
 
+  const yesAsk2 = parseFloat(market.yes_ask_dollars || "0");
+  const noBid2 = parseFloat(market.no_bid_dollars || "0");
+  const spread2 = Math.max(0, (yesAsk2 > 0 ? yesAsk2 : 1 - noBid2) - midPrice);
+  const theoreticalEdge2 = noEdge / 100;
+  const { executableEdge: execEdge2, kellySize: ks2 } = computeEdgeMetrics(theoreticalEdge2, spread2);
+  const depth2 = estimateLiquidityDepth(market);
+  const src2 = "yes_no_asymmetry";
+
+  // Risk guardrails (HARDCODED)
+  if (depth2 < MIN_DEPTH) return null;
+  if (execEdge2 < MIN_EXEC_EDGE) return null;
+
   return {
     ticker: market.ticker,
     title: market.title || market.ticker,
@@ -161,10 +256,15 @@ function analyzeYesNoAsymmetry(market: KalshiMarket): LiveSignal | null {
     signalType: "BUY_NO",
     modelConfidence: parseFloat(confidence.toFixed(3)),
     modelName: "YES-NO-Asymmetry",
-    edgeSource: "yes_no_asymmetry",
+    edgeSource: src2,
     reasoning: `At ${(midPrice*100).toFixed(0)}¢, taker flow is dominated by optimistic YES buyers (UI default bias). NO outperforms YES at 69 of 99 price levels. Dollar-weighted, YES returns -1.02% while NO returns +0.83%. Post-only NO limit orders also capture the 0.05% maker rebate.`,
     riskLevel: "low",
     createdAt: new Date().toISOString(),
+    gapType: classifyGapType(market, spread2, src2),
+    spread: parseFloat(spread2.toFixed(4)),
+    executableEdge: execEdge2,
+    liquidityDepth: depth2,
+    kellySize: ks2,
   };
 }
 
@@ -278,6 +378,18 @@ async function analyzeWeatherMarkets(): Promise<LiveSignal[]> {
         const timeConfidence = daysOut <= 1 ? 0.92 : daysOut <= 3 ? 0.88 : daysOut <= 5 ? 0.82 : 0.72;
         const confidence = parseFloat(Math.min(0.95, timeConfidence).toFixed(3));
 
+        const weatherYesAsk = parseFloat(market.yes_ask_dollars || "0");
+        const weatherYesBid = parseFloat(market.yes_bid_dollars || "0");
+        const weatherSpread = Math.max(0, weatherYesAsk - weatherYesBid);
+        const weatherTheoEdge = Math.abs(edge) / 100;
+        const { executableEdge: weatherExec, kellySize: weatherKelly } = computeEdgeMetrics(weatherTheoEdge, weatherSpread);
+        const weatherDepth = estimateLiquidityDepth(market);
+        const weatherSrc = "weather_model";
+
+        // Risk guardrails (HARDCODED)
+        if (weatherDepth < MIN_DEPTH) continue;
+        if (weatherExec < MIN_EXEC_EDGE) continue;
+
         signals.push({
           ticker: market.ticker,
           title: market.title || market.ticker,
@@ -288,10 +400,15 @@ async function analyzeWeatherMarkets(): Promise<LiveSignal[]> {
           signalType,
           modelConfidence: confidence,
           modelName: "GFS-31-Ensemble",
-          edgeSource: "weather_model",
+          edgeSource: weatherSrc,
           reasoning: `GFS 31-member ensemble: ${memberTemps.length} members forecast ${targetDate} NYC high of ${meanTemp.toFixed(0)}°F (range ${Math.min(...memberTemps).toFixed(0)}-${Math.max(...memberTemps).toFixed(0)}°F).${pointForecast ? ` Point forecast: ${pointForecast.toFixed(0)}°F.` : ''} Ensemble gives ${(gfsProbability*100).toFixed(0)}% probability for this bracket vs. market price of ${(marketPrice*100).toFixed(0)}¢ — a ${Math.abs(edge).toFixed(1)}% edge. ${daysOut <= 2 ? 'Near-term forecast (high accuracy).' : 'Multi-day forecast — edge may narrow as resolution approaches.'}`,
           riskLevel: Math.abs(edge) > 30 ? "low" : Math.abs(edge) > 15 ? "low" : "medium",
           createdAt: new Date().toISOString(),
+          gapType: classifyGapType(market, weatherSpread, weatherSrc),
+          spread: parseFloat(weatherSpread.toFixed(4)),
+          executableEdge: weatherExec,
+          liquidityDepth: weatherDepth,
+          kellySize: weatherKelly,
         });
       }
     }
@@ -322,6 +439,15 @@ function analyzeMarketStructure(market: KalshiMarket): LiveSignal | null {
     // The maker-taker gap is structurally +1.12% for makers
     const makerEdge = 1.12 + (spread * 100 * 0.3); // wider spread = more edge for limit orders
 
+    const theoreticalEdgeStruct = makerEdge / 100;
+    const { executableEdge: execStruct, kellySize: ksStruct } = computeEdgeMetrics(theoreticalEdgeStruct, spread);
+    const depthStruct = estimateLiquidityDepth(market);
+    const srcStruct = "market_maker_spread";
+
+    // Risk guardrails (HARDCODED)
+    if (depthStruct < MIN_DEPTH) return null;
+    if (execStruct < MIN_EXEC_EDGE) return null;
+
     return {
       ticker: market.ticker,
       title: market.title || market.ticker,
@@ -332,10 +458,15 @@ function analyzeMarketStructure(market: KalshiMarket): LiveSignal | null {
       signalType: "BUY_YES",
       modelConfidence: parseFloat(Math.min(0.78, 0.55 + (Math.min(oi, 10000) / 10000) * 0.23).toFixed(3)),
       modelName: "Spread-Structure",
-      edgeSource: "market_maker_spread",
+      edgeSource: srcStruct,
       reasoning: `Wide spread of ${(spread*100).toFixed(0)}¢ with ${oi.toFixed(0)} open interest. Post-only limit orders near the midpoint (${(midPrice*100).toFixed(0)}¢) capture the spread + Kalshi's 0.05% maker rebate. Makers earn +1.12% avg excess return vs. takers. Rebalance every 30-60s.`,
       riskLevel: "low",
       createdAt: new Date().toISOString(),
+      gapType: classifyGapType(market, spread, srcStruct),
+      spread: parseFloat(spread.toFixed(4)),
+      executableEdge: execStruct,
+      liquidityDepth: depthStruct,
+      kellySize: ksStruct,
     };
   }
 
@@ -395,6 +526,11 @@ function analyzeRiskExits(market: KalshiMarket, positions: PositionInfo[]): Live
         reasoning: `STOP-LOSS triggered. Your ${pos.side.toUpperCase()} position entered at ${(entryPrice*100).toFixed(0)}¢ is now at ${(currentPrice*100).toFixed(0)}¢ — down ${Math.abs(pnlPct).toFixed(0)}%. The position has lost more than 50% of entry value. Risk management imperative: exit to preserve capital. Remaining in a losing position beyond stop-loss increases adverse selection risk.`,
         riskLevel: "critical",
         createdAt: new Date().toISOString(),
+        gapType: "D" as const,
+        spread: 0,
+        executableEdge: 0,
+        liquidityDepth: 0,
+        kellySize: 0,
       });
       continue;
     }
@@ -416,6 +552,11 @@ function analyzeRiskExits(market: KalshiMarket, positions: PositionInfo[]): Live
         reasoning: `TAKE-PROFIT opportunity. Your YES position entered at ${(entryPrice*100).toFixed(0)}¢ is now at ${(currentPrice*100).toFixed(0)}¢ — up ${pnlPct.toFixed(0)}%. Price is converging toward $1 (near certainty). Late-market convergence reduces remaining upside while the spread widens. Lock in profits now — the last 10-15¢ of movement carries the most slippage risk.`,
         riskLevel: "medium",
         createdAt: new Date().toISOString(),
+        gapType: "D" as const,
+        spread: 0,
+        executableEdge: 0,
+        liquidityDepth: 0,
+        kellySize: 0,
       });
       continue;
     }
@@ -436,6 +577,11 @@ function analyzeRiskExits(market: KalshiMarket, positions: PositionInfo[]): Live
         reasoning: `TAKE-PROFIT opportunity. Your NO position (entered when YES was ${(entryPrice*100).toFixed(0)}¢) is deep in profit — YES has collapsed to ${(currentPrice*100).toFixed(0)}¢. Price is converging toward $0. Lock in gains before resolution — late-market spread widening can erode profits.`,
         riskLevel: "medium",
         createdAt: new Date().toISOString(),
+        gapType: "D" as const,
+        spread: 0,
+        executableEdge: 0,
+        liquidityDepth: 0,
+        kellySize: 0,
       });
       continue;
     }
@@ -456,6 +602,11 @@ function analyzeRiskExits(market: KalshiMarket, positions: PositionInfo[]): Live
         reasoning: `LIQUIDITY WARNING. Your ${pos.quantity}-contract ${pos.side.toUpperCase()} position is in a market with only ${volume.toFixed(0)} contracts traded recently. Low liquidity means you may not be able to exit at a fair price later. Wide bid-ask spreads in thin markets create adverse selection risk. Consider reducing position size now while there's still some book depth.`,
         riskLevel: "high",
         createdAt: new Date().toISOString(),
+        gapType: "D" as const,
+        spread: 0,
+        executableEdge: 0,
+        liquidityDepth: 0,
+        kellySize: 0,
       });
       continue;
     }
@@ -476,6 +627,11 @@ function analyzeRiskExits(market: KalshiMarket, positions: PositionInfo[]): Live
         reasoning: `DRAWDOWN WARNING. Your ${pos.side.toUpperCase()} position entered at ${(entryPrice*100).toFixed(0)}¢ is now at ${(currentPrice*100).toFixed(0)}¢ — down ${Math.abs(pnlPct).toFixed(0)}%. Approaching stop-loss territory. Consider reducing size by 50% to limit further downside while keeping some exposure if the market recovers. Fractional Kelly sizing suggests position is oversized at this drawdown level.`,
         riskLevel: "high",
         createdAt: new Date().toISOString(),
+        gapType: "D" as const,
+        spread: 0,
+        executableEdge: 0,
+        liquidityDepth: 0,
+        kellySize: 0,
       });
     }
   }

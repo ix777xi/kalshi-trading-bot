@@ -49,6 +49,10 @@ export interface IStorage {
   createPendingTrade(data: InsertPendingTrade): Promise<PendingTrade>;
   updatePendingTradeStatus(id: number, status: string, extra?: { orderId?: string; errorMessage?: string; decidedAt?: string; executedAt?: string }): Promise<PendingTrade>;
   updatePendingTrade(id: number, data: { contracts?: number; priceCents?: number }): Promise<PendingTrade>;
+  // Bot Mode
+  getBotMode(): Promise<string>;
+  setBotMode(mode: string): Promise<void>;
+  getDailyPnl(): Promise<number>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -170,6 +174,32 @@ export class DatabaseStorage implements IStorage {
     if (data.contracts !== undefined) update.contracts = data.contracts;
     if (data.priceCents !== undefined) update.priceCents = data.priceCents;
     return db.update(pendingTrades).set(update).where(eq(pendingTrades.id, id)).returning().get();
+  }
+
+  async getBotMode(): Promise<string> {
+    const s = db.select().from(settings).get();
+    return (s as any)?.botMode || "hitl";
+  }
+
+  async setBotMode(mode: string): Promise<void> {
+    const s = db.select().from(settings).get();
+    if (s) {
+      db.update(settings)
+        .set({ botMode: mode, updatedAt: new Date().toISOString() } as any)
+        .where(eq(settings.id, s.id))
+        .run();
+    }
+  }
+
+  async getDailyPnl(): Promise<number> {
+    // Sum estimated cost of auto-executed trades today as a proxy for daily P&L impact
+    const today = new Date().toISOString().slice(0, 10);
+    const trades = db.select().from(pendingTrades).all();
+    const todayTrades = trades.filter(
+      (t: any) => t.autoExecuted && (t.executedAt || t.createdAt || "").startsWith(today)
+    );
+    // Simplified: return negative if we have losses (executed cost) as placeholder
+    return todayTrades.reduce((sum: number, t: any) => sum - (t.estimatedCost || 0), 0);
   }
 }
 
