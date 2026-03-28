@@ -692,6 +692,85 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Configure your RSA private key in Settings to execute trades" });
       }
 
+      // ── Arbitrage multi-leg execution ──────────────────────────────────────
+      // ARB trades have synthetic tickers like "KXCPI-26SEP-ARB" — they require
+      // one order per bracket in the event. Fetch the event's brackets and place
+      // one order for each.
+      if (trade.ticker.endsWith("-ARB") && trade.edgeSource === "intra_market_arbitrage") {
+        const eventTicker = trade.ticker.replace(/-ARB$/, "");
+        const isSell = trade.action === "sell";
+        const action = isSell ? "sell" : "buy";
+
+        // Fetch all open markets for this event from Kalshi
+        let bracketMarkets: any[] = [];
+        try {
+          const eventData = await rateLimiter.enqueue(() =>
+            fetch(`${KALSHI_BASE}/markets?status=open&limit=100&event_ticker=${eventTicker}`, {
+              headers: { "Content-Type": "application/json" },
+            }).then(r => r.json())
+          );
+          bracketMarkets = eventData?.markets || [];
+        } catch (fetchErr: any) {
+          await storage.updatePendingTradeStatus(id, "failed", { errorMessage: `Failed to fetch brackets: ${fetchErr.message}` });
+          return res.status(500).json({ error: `Failed to fetch event brackets: ${fetchErr.message}` });
+        }
+
+        if (bracketMarkets.length === 0) {
+          await storage.updatePendingTradeStatus(id, "failed", { errorMessage: "No open brackets found for this event" });
+          return res.status(400).json({ error: "No open brackets found for this event" });
+        }
+
+        // Place one order per bracket (1 contract each)
+        const orderIds: string[] = [];
+        const errors: string[] = [];
+        for (const bracket of bracketMarkets) {
+          const yesBid = parseFloat(bracket.yes_bid_dollars || "0");
+          if (yesBid <= 0) continue; // Skip brackets with no bid
+          const priceCents = Math.round(yesBid * 100);
+          if (priceCents < 1 || priceCents > 99) continue;
+
+          const legOrder: any = {
+            ticker: bracket.ticker,
+            side: "yes",
+            action,
+            count: 1,
+            type: "limit",
+            client_order_id: randomUUID(),
+            yes_price: priceCents,
+            ...(isSell ? { reduce_only: true } : { post_only: true }),
+          };
+
+          try {
+            const legResult = await kalshiAuthFetch("POST", "/portfolio/orders", legOrder);
+            if (legResult.ok) {
+              const oid = (legResult.data as any)?.order?.order_id || (legResult.data as any)?.order_id || "unknown";
+              orderIds.push(oid);
+            } else {
+              const errMsg = (legResult.data as any)?.detail || (legResult.data as any)?.error || JSON.stringify(legResult.data);
+              errors.push(`${bracket.ticker}: ${errMsg}`);
+            }
+          } catch (legErr: any) {
+            errors.push(`${bracket.ticker}: ${legErr.message}`);
+          }
+        }
+
+        if (orderIds.length > 0) {
+          const summaryId = orderIds.slice(0, 3).join(", ") + (orderIds.length > 3 ? `... (${orderIds.length} legs)` : "");
+          await storage.updatePendingTradeStatus(id, "executed", {
+            orderId: summaryId,
+            executedAt: new Date().toISOString(),
+          });
+          const msg = `ARB executed: ${orderIds.length}/${bracketMarkets.length} legs placed.${errors.length > 0 ? ` ${errors.length} failed.` : ""}`;
+          res.json({ success: true, orderId: summaryId, message: msg, legs: orderIds.length, errors, trade: await storage.getPendingTradeById(id) });
+        } else {
+          const errMsg = errors.length > 0 ? errors.join("; ") : "All bracket orders failed";
+          await storage.updatePendingTradeStatus(id, "failed", { errorMessage: errMsg });
+          res.status(500).json({ error: errMsg, trade: await storage.getPendingTradeById(id) });
+        }
+        return;
+      }
+
+      // ── Standard single-leg order execution ──────────────────────────────────
       const isYes = trade.side === "yes";
       const isSell = trade.action === "sell";
       const orderBody: any = {
@@ -701,7 +780,7 @@ export async function registerRoutes(
         count: trade.contracts,
         type: "limit",
         client_order_id: randomUUID(),
-        post_only: !isSell, // Sell orders use IOC for faster exit
+        post_only: !isSell,
         ...(isSell ? { reduce_only: true } : {}),
       };
       if (isYes) {
@@ -1715,6 +1794,7 @@ export async function registerRoutes(
   }
 
   // Helper: auto-execute a trade via Kalshi API
+  // Handles both standard single-ticker trades and multi-leg ARB trades
   async function autoExecuteTrade(
     ticker: string,
     side: string,
@@ -1726,6 +1806,57 @@ export async function registerRoutes(
       const creds = await getKalshiCredentials();
       if (!creds) return { ok: false, error: "No API credentials configured" };
 
+      // ── Multi-leg ARB execution ──────────────────────────────────────────
+      if (ticker.endsWith("-ARB")) {
+        const eventTicker = ticker.replace(/-ARB$/, "");
+        try {
+          const eventData = await rateLimiter.enqueue(() =>
+            fetch(`${KALSHI_BASE}/markets?status=open&limit=100&event_ticker=${eventTicker}`, {
+              headers: { "Content-Type": "application/json" },
+            }).then(r => r.json())
+          );
+          const brackets = eventData?.markets || [];
+          if (brackets.length === 0) return { ok: false, error: "No brackets found for ARB event" };
+
+          const orderIds: string[] = [];
+          const errors: string[] = [];
+          for (const bracket of brackets) {
+            const yesBid = parseFloat(bracket.yes_bid_dollars || "0");
+            if (yesBid <= 0) continue;
+            const legPrice = Math.round(yesBid * 100);
+            if (legPrice < 1 || legPrice > 99) continue;
+
+            const legOrder: any = {
+              ticker: bracket.ticker,
+              side: "yes",
+              action,
+              count: 1,
+              type: "limit",
+              client_order_id: randomUUID(),
+              yes_price: legPrice,
+              ...(action === "sell" ? { reduce_only: true } : { post_only: true }),
+            };
+
+            const legResult = await kalshiAuthFetch("POST", "/portfolio/orders", legOrder);
+            if (legResult.ok) {
+              const oid = (legResult.data as any)?.order?.order_id || "ok";
+              orderIds.push(oid);
+            } else {
+              errors.push(bracket.ticker);
+            }
+          }
+
+          if (orderIds.length > 0) {
+            return { ok: true, orderId: `ARB:${orderIds.length}legs` };
+          } else {
+            return { ok: false, error: `All ${errors.length} ARB legs failed` };
+          }
+        } catch (arbErr: any) {
+          return { ok: false, error: `ARB execution error: ${arbErr.message}` };
+        }
+      }
+
+      // ── Standard single-leg execution ───────────────────────────────────────
       const orderBody: any = {
         ticker,
         side,
