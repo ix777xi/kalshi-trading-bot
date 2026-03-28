@@ -294,35 +294,213 @@ function clamp(v: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, v));
 }
 
-// Favorite-longshot bias correction: contracts < 20¢ are overpriced for YES
-function favoriteLongshotCorrection(price: number): number {
-  if (price < 0.10) return -0.03;
-  if (price < 0.20) return -0.02;
-  if (price < 0.30) return -0.01;
-  if (price > 0.80) return 0.02;
-  if (price > 0.90) return 0.03;
+// ── Intelligence Layer 1: Favorite-Longshot Bias ──────────────────────────────
+// Empirically, low-priced YES contracts are overpriced; high-priced contracts are underpriced.
+// Magnitude varies by sport: sports markets are less efficient than politics/finance.
+
+const FLB_ADJUSTMENTS: Record<string, Record<string, number>> = {
+  // price_range → adjustment
+  nba:    { "0-10": -0.04, "10-20": -0.025, "20-30": -0.015, "70-80": 0.015, "80-90": 0.025, "90-95": 0.035 },
+  nfl:    { "0-10": -0.04, "10-20": -0.03,  "20-30": -0.02,  "70-80": 0.02,  "80-90": 0.03,  "90-95": 0.04 },
+  mlb:    { "0-10": -0.03, "10-20": -0.02,  "20-30": -0.01,  "70-80": 0.01,  "80-90": 0.02,  "90-95": 0.025 },
+  nhl:    { "0-10": -0.03, "10-20": -0.02,  "20-30": -0.01,  "70-80": 0.015, "80-90": 0.025, "90-95": 0.03 },
+  soccer: { "0-10": -0.05, "10-20": -0.035, "20-30": -0.02,  "70-80": 0.02,  "80-90": 0.035, "90-95": 0.045 },
+  cbb:    { "0-10": -0.05, "10-20": -0.03,  "20-30": -0.02,  "70-80": 0.02,  "80-90": 0.03,  "90-95": 0.04 },
+  default:{ "0-10": -0.03, "10-20": -0.02,  "20-30": -0.01,  "70-80": 0.01,  "80-90": 0.02,  "90-95": 0.03 },
+};
+
+function favoriteLongshotCorrection(price: number, sportId: string): number {
+  const pricePct = price * 100;
+  const table = FLB_ADJUSTMENTS[sportId] ?? FLB_ADJUSTMENTS.default;
+  for (const [range, adj] of Object.entries(table)) {
+    const [lo, hi] = range.split("-").map(Number);
+    if (pricePct >= lo && pricePct < hi) return adj;
+  }
   return 0;
 }
+
+// ── Intelligence Layer 2: Home Advantage by Sport ─────────────────────────────
+// Home advantage varies significantly by sport.
+const HOME_ADVANTAGE: Record<string, number> = {
+  nba: 0.035,    // ~3.5% — NBA home advantage has shrunk post-COVID
+  nfl: 0.030,    // ~3.0% — NFL home field
+  mlb: 0.025,    // ~2.5% — MLB smallest home edge
+  nhl: 0.030,    // ~3.0% — NHL ice advantage
+  soccer: 0.045, // ~4.5% — Soccer strongest home advantage
+  cbb: 0.050,    // ~5.0% — College BB loudest crowds, biggest edge
+  ufc: 0.010,    // ~1.0% — Minimal for fighting
+  tennis: 0.005, // ~0.5% — Negligible in tennis
+  golf: 0.000,   // 0% — No home advantage in golf
+  esports: 0.015,// ~1.5% — Small edge for "home" side in esports
+};
+
+// ── Intelligence Layer 3: Historical Comeback Rates ───────────────────────────
+// Used to detect when market overreacts to a deficit in live games.
+// Format: { deficit: comeback_probability } at various game stages
+const COMEBACK_RATES: Record<string, Record<string, Record<number, number>>> = {
+  nba: {
+    q1: { 5: 0.65, 10: 0.55, 15: 0.40, 20: 0.28, 25: 0.15 },
+    q2: { 5: 0.58, 10: 0.42, 15: 0.28, 20: 0.15, 25: 0.07 },
+    q3: { 5: 0.50, 10: 0.32, 15: 0.18, 20: 0.08, 25: 0.03 },
+    q4: { 5: 0.38, 10: 0.18, 15: 0.06, 20: 0.02, 25: 0.005 },
+  },
+  nfl: {
+    q1: { 3: 0.72, 7: 0.58, 10: 0.48, 14: 0.35, 21: 0.18 },
+    q2: { 3: 0.65, 7: 0.50, 10: 0.38, 14: 0.25, 21: 0.10 },
+    q3: { 3: 0.55, 7: 0.38, 10: 0.25, 14: 0.14, 21: 0.05 },
+    q4: { 3: 0.42, 7: 0.22, 10: 0.10, 14: 0.04, 21: 0.01 },
+  },
+  nhl: {
+    p1: { 1: 0.60, 2: 0.40, 3: 0.22 },
+    p2: { 1: 0.50, 2: 0.28, 3: 0.12 },
+    p3: { 1: 0.38, 2: 0.15, 3: 0.05 },
+  },
+  mlb: {
+    early: { 1: 0.62, 2: 0.50, 3: 0.38, 4: 0.28, 5: 0.18 },  // innings 1-3
+    mid:   { 1: 0.55, 2: 0.40, 3: 0.28, 4: 0.18, 5: 0.10 },  // innings 4-6
+    late:  { 1: 0.42, 2: 0.25, 3: 0.14, 4: 0.07, 5: 0.03 },  // innings 7-9
+  },
+};
+
+function getComebackProb(sportId: string, deficit: number, period: number): number | null {
+  const rates = COMEBACK_RATES[sportId];
+  if (!rates) return null;
+
+  let stageKey: string;
+  if (sportId === "nba" || sportId === "cbb") {
+    stageKey = `q${Math.min(period, 4)}`;
+  } else if (sportId === "nfl") {
+    stageKey = `q${Math.min(period, 4)}`;
+  } else if (sportId === "nhl") {
+    stageKey = `p${Math.min(period, 3)}`;
+  } else if (sportId === "mlb") {
+    stageKey = period <= 3 ? "early" : period <= 6 ? "mid" : "late";
+  } else {
+    return null;
+  }
+
+  const stageCurve = rates[stageKey];
+  if (!stageCurve) return null;
+
+  // Find closest deficit key
+  const deficits = Object.keys(stageCurve).map(Number).sort((a, b) => a - b);
+  const absDef = Math.abs(deficit);
+  let closestRate = 0.5;
+  for (const d of deficits) {
+    if (absDef <= d) {
+      closestRate = stageCurve[d];
+      break;
+    }
+    closestRate = stageCurve[d];
+  }
+  return closestRate;
+}
+
+// ── Intelligence Layer 4: Stale Price Detection ──────────────────────────────
+// Track price history to detect when Kalshi prices haven't adjusted to new info.
+const priceMemory: Map<string, { prices: number[]; lastUpdate: number }> = new Map();
+
+function detectStalePrice(ticker: string, currentPrice: number): { isStale: boolean; priceVelocity: number } {
+  const now = Date.now();
+  const history = priceMemory.get(ticker);
+
+  if (history) {
+    history.prices.push(currentPrice);
+    if (history.prices.length > 20) history.prices.shift();
+    history.lastUpdate = now;
+  } else {
+    priceMemory.set(ticker, { prices: [currentPrice], lastUpdate: now });
+    return { isStale: false, priceVelocity: 0 };
+  }
+
+  const prices = priceMemory.get(ticker)!.prices;
+  if (prices.length < 3) return { isStale: false, priceVelocity: 0 };
+
+  // Price velocity: how fast is the price moving?
+  const recent = prices.slice(-3);
+  const velocity = (recent[recent.length - 1] - recent[0]) / recent.length;
+
+  // Stale = price hasn't moved more than 0.5¢ in last 5+ readings during a live game
+  const last5 = prices.slice(-5);
+  const maxDiff = Math.max(...last5) - Math.min(...last5);
+  const isStale = prices.length >= 5 && maxDiff < 0.005;
+
+  return { isStale, priceVelocity: velocity };
+}
+
+// ── Intelligence Layer 5: Cross-Market Correlation ───────────────────────────
+// Track moneyline vs spread/total for the same event to detect lagging adjustments.
+const eventPriceMap: Map<string, { moneyline: number; spreads: number[]; totals: number[] }> = new Map();
+
+function detectCrossMarketLag(
+  eventTicker: string,
+  marketType: "moneyline" | "spread" | "total",
+  price: number
+): number {
+  let data = eventPriceMap.get(eventTicker);
+  if (!data) {
+    data = { moneyline: 0, spreads: [], totals: [] };
+    eventPriceMap.set(eventTicker, data);
+  }
+
+  if (marketType === "moneyline") {
+    data.moneyline = price;
+  } else if (marketType === "spread") {
+    data.spreads.push(price);
+    if (data.spreads.length > 10) data.spreads.shift();
+  } else {
+    data.totals.push(price);
+    if (data.totals.length > 10) data.totals.shift();
+  }
+
+  // If moneyline suggests a big favorite but spread hasn't adjusted, there's alpha
+  if (data.moneyline > 0 && data.spreads.length > 0) {
+    const spreadAvg = data.spreads.reduce((a, b) => a + b, 0) / data.spreads.length;
+    const divergence = Math.abs(data.moneyline - spreadAvg) - 0.05;
+    if (divergence > 0) return divergence;
+  }
+  return 0;
+}
+
+// ── Enhanced Pre-Game Model ──────────────────────────────────────────────────
 
 function computePreGameProb(
   kalshiPrice: number,
   homeWinPct: number,
   awayWinPct: number,
-  isHomeTeam: boolean
+  isHomeTeam: boolean,
+  sportId: string = "nba"
 ): number {
   const base = clamp(kalshiPrice, 0.02, 0.98);
-  const flbAdj = favoriteLongshotCorrection(base);
-  const homeAdv = isHomeTeam ? 0.03 : -0.03;
+
+  // Layer 1: FLB correction (sport-specific)
+  const flbAdj = favoriteLongshotCorrection(base, sportId);
+
+  // Layer 2: Home advantage (sport-specific)
+  const homeAdv = isHomeTeam
+    ? (HOME_ADVANTAGE[sportId] ?? 0.03)
+    : -(HOME_ADVANTAGE[sportId] ?? 0.03);
+
+  // Layer 3: Team strength differential from records
   const teamWinPct = isHomeTeam ? homeWinPct : awayWinPct;
   const oppWinPct = isHomeTeam ? awayWinPct : homeWinPct;
   const totalWins = teamWinPct + oppWinPct;
+  // Stronger teams get bigger record adjustment
   const recordAdj = totalWins > 0
-    ? (teamWinPct / totalWins - 0.5) * 0.10
+    ? (teamWinPct / totalWins - 0.5) * 0.15 // 15% weight on record differential
     : 0;
-  return clamp(base + flbAdj + homeAdv + recordAdj, 0.02, 0.98);
+
+  // Layer 4: Elo-like strength estimate
+  // Teams with >65% win rate get extra boost, teams <35% get penalized
+  let eloAdj = 0;
+  if (teamWinPct > 0.65) eloAdj = (teamWinPct - 0.65) * 0.20;
+  else if (teamWinPct < 0.35) eloAdj = (teamWinPct - 0.35) * 0.20;
+
+  return clamp(base + flbAdj + homeAdv + recordAdj + eloAdj, 0.03, 0.97);
 }
 
-// Live game probability models per sport
+// ── Enhanced Live Game Model ─────────────────────────────────────────────────
+
 const PERIOD_WEIGHTS: Record<string, Record<number, number>> = {
   nba: { 1: 0.005, 2: 0.008, 3: 0.012, 4: 0.020, 5: 0.030 },
   cbb: { 1: 0.008, 2: 0.018, 3: 0.025 },
@@ -345,28 +523,75 @@ function computeLiveWinProb(
   const weights = PERIOD_WEIGHTS[sportId] ?? PERIOD_WEIGHTS.nba;
   const maxPeriod = Math.max(...Object.keys(weights).map(Number));
   const weight = weights[period] ?? weights[maxPeriod] ?? 0.01;
-  return clamp(base + scoreDiff * weight, 0.02, 0.98);
+
+  // Base probability from score differential
+  let liveProb = clamp(base + scoreDiff * weight, 0.02, 0.98);
+
+  // Layer: Comeback rate adjustment
+  // If trailing, check if market is underpricing the comeback probability
+  if (scoreDiff < 0) {
+    const comebackRate = getComebackProb(sportId, scoreDiff, period);
+    if (comebackRate !== null) {
+      // Blend: 60% live model + 40% comeback historical rate
+      liveProb = liveProb * 0.60 + comebackRate * 0.40;
+    }
+  }
+
+  // Layer: Late-game convergence — prices should converge toward 0 or 1
+  // In final period, widen the adjustment to account for resolution
+  const isFinalPeriod = (
+    (sportId === "nba" && period >= 4) ||
+    (sportId === "nfl" && period >= 4) ||
+    (sportId === "nhl" && period >= 3) ||
+    (sportId === "mlb" && period >= 7) ||
+    (sportId === "soccer" && period >= 2)
+  );
+  if (isFinalPeriod && Math.abs(scoreDiff) > 0) {
+    // Push probability further toward the leader in final period
+    const convergencePush = scoreDiff > 0 ? 0.03 : -0.03;
+    liveProb = clamp(liveProb + convergencePush, 0.02, 0.98);
+  }
+
+  return clamp(liveProb, 0.02, 0.98);
 }
 
-// Momentum detection: 3+ consecutive scoring by one side boosts probability
+// ── Momentum Detection (Enhanced) ────────────────────────────────────────────
+// Use score differential relative to period to detect momentum shifts.
+// In early periods, a 10-point lead in NBA is less significant than Q4.
+
 function detectMomentum(
   homeScore: number,
   awayScore: number,
-  period: number
+  period: number,
+  sportId: string = "nba"
 ): "home" | "away" | "neutral" {
-  // Simple heuristic based on score differential and period
   const diff = homeScore - awayScore;
-  if (period >= 3 && diff >= 10) return "home";
-  if (period >= 3 && diff <= -10) return "away";
-  if (period >= 2 && diff >= 15) return "home";
-  if (period >= 2 && diff <= -15) return "away";
+
+  // Sport-specific momentum thresholds
+  const thresholds: Record<string, Record<string, number>> = {
+    nba: { early: 15, mid: 10, late: 7 },
+    nfl: { early: 14, mid: 10, late: 7 },
+    nhl: { early: 2, mid: 2, late: 1 },
+    mlb: { early: 4, mid: 3, late: 2 },
+    soccer: { early: 2, mid: 1, late: 1 },
+    cbb: { early: 12, mid: 8, late: 5 },
+  };
+
+  const t = thresholds[sportId] ?? thresholds.nba;
+  const maxPeriod = sportId === "mlb" ? 9 : sportId === "nhl" ? 3 : sportId === "soccer" ? 2 : 4;
+  const stage = period <= Math.ceil(maxPeriod / 3) ? "early"
+    : period <= Math.ceil(maxPeriod * 2 / 3) ? "mid" : "late";
+  const threshold = t[stage] ?? 10;
+
+  if (diff >= threshold) return "home";
+  if (diff <= -threshold) return "away";
   return "neutral";
 }
 
 function momentumBoost(momentum: "home" | "away" | "neutral", isHomeTeam: boolean): number {
   if (momentum === "neutral") return 0;
-  if ((momentum === "home" && isHomeTeam) || (momentum === "away" && !isHomeTeam)) return 0.03;
-  return -0.02;
+  if ((momentum === "home" && isHomeTeam) || (momentum === "away" && !isHomeTeam)) return 0.04;
+  return -0.03;
 }
 
 // ── Kelly Position Sizing ─────────────────────────────────────────────────────
@@ -501,10 +726,32 @@ async function scanSport(sport: SportConfig): Promise<SportsSignal[]> {
         midPrice,
         isHomeTeam
       );
-      momentum = detectMomentum(matchedEvent.homeScore, matchedEvent.awayScore, matchedEvent.period);
+      momentum = detectMomentum(matchedEvent.homeScore, matchedEvent.awayScore, matchedEvent.period, sport.id);
       modelProb = clamp(modelProb + momentumBoost(momentum, isHomeTeam), 0.02, 0.98);
     } else {
-      modelProb = computePreGameProb(midPrice, homeWinPct, awayWinPct, isHomeTeam);
+      modelProb = computePreGameProb(midPrice, homeWinPct, awayWinPct, isHomeTeam, sport.id);
+    }
+
+    // Intelligence Layer 4: Stale price detection
+    const staleInfo = detectStalePrice(ticker, midPrice);
+
+    // Intelligence Layer 5: Cross-market correlation
+    const eventTicker = market.event_ticker || ticker.split("-").slice(0, -1).join("-");
+    const marketType = ticker.includes("PTS") || ticker.includes("TOTAL") ? "total"
+      : ticker.includes("SPREAD") ? "spread" : "moneyline";
+    const crossMarketAlpha = detectCrossMarketLag(eventTicker, marketType, midPrice);
+
+    // If price is stale during a live game, boost model confidence
+    if (staleInfo.isStale && isLive) {
+      // Stale price = market hasn't caught up to score changes
+      // Boost model probability in the direction the score suggests
+      const staleBoost = staleInfo.priceVelocity > 0 ? 0.02 : staleInfo.priceVelocity < 0 ? -0.02 : 0;
+      modelProb = clamp(modelProb + staleBoost, 0.03, 0.97);
+    }
+
+    // Cross-market alpha adds to the edge
+    if (crossMarketAlpha > 0.02) {
+      modelProb = clamp(modelProb + crossMarketAlpha * 0.5, 0.03, 0.97);
     }
 
     const edge = modelProb - midPrice;
@@ -555,9 +802,20 @@ async function scanSport(sport: SportConfig): Promise<SportsSignal[]> {
       ? `Q${matchedEvent.period} ${matchedEvent.clock}`
       : undefined;
 
+    // Build intelligence context for reasoning
+    const intel: string[] = [];
+    if (staleInfo.isStale && isLive) intel.push("STALE PRICE detected");
+    if (crossMarketAlpha > 0.02) intel.push(`Cross-mkt lag +${(crossMarketAlpha * 100).toFixed(1)}%`);
+    if (momentum !== "neutral") intel.push(`Momentum: ${momentum}`);
+    const comebackRate = isLive && matchedEvent && (isHomeTeam ? matchedEvent.homeScore < matchedEvent.awayScore : matchedEvent.awayScore < matchedEvent.homeScore)
+      ? getComebackProb(sport.id, isHomeTeam ? matchedEvent.homeScore - matchedEvent.awayScore : matchedEvent.awayScore - matchedEvent.homeScore, matchedEvent.period)
+      : null;
+    if (comebackRate !== null) intel.push(`Comeback rate: ${(comebackRate * 100).toFixed(0)}%`);
+    const intelStr = intel.length > 0 ? ` [${intel.join(" | ")}]` : "";
+
     const reasoning = isLive && matchedEvent
-      ? `${sport.name}: ${matchedEvent.away} ${matchedEvent.awayScore} - ${matchedEvent.home} ${matchedEvent.homeScore} (${periodStr}). Model: ${(modelProb * 100).toFixed(0)}% vs Kalshi: ${(midPrice * 100).toFixed(0)}¢. Edge: ${edgePct >= 0 ? "+" : ""}${edgePct.toFixed(1)}%. ${riskCheck.allowed ? `${action} $${finalSize.toFixed(2)}` : `BLOCKED: ${riskCheck.reason}`}`
-      : `${sport.name}: ${eventName}. Model: ${(modelProb * 100).toFixed(0)}% vs Kalshi: ${(midPrice * 100).toFixed(0)}¢. Edge: ${edgePct >= 0 ? "+" : ""}${edgePct.toFixed(1)}%. ${riskCheck.allowed ? `${action} $${finalSize.toFixed(2)}` : `BLOCKED: ${riskCheck.reason}`}`;
+      ? `${sport.name}: ${matchedEvent.away} ${matchedEvent.awayScore} - ${matchedEvent.home} ${matchedEvent.homeScore} (${periodStr}). Model: ${(modelProb * 100).toFixed(0)}% vs Kalshi: ${(midPrice * 100).toFixed(0)}¢. Edge: ${edgePct >= 0 ? "+" : ""}${edgePct.toFixed(1)}%.${intelStr} ${riskCheck.allowed ? `${action} $${finalSize.toFixed(2)}` : `BLOCKED: ${riskCheck.reason}`}`
+      : `${sport.name}: ${eventName}. Model: ${(modelProb * 100).toFixed(0)}% vs Kalshi: ${(midPrice * 100).toFixed(0)}¢. Edge: ${edgePct >= 0 ? "+" : ""}${edgePct.toFixed(1)}%.${intelStr} ${riskCheck.allowed ? `${action} $${finalSize.toFixed(2)}` : `BLOCKED: ${riskCheck.reason}`}`;
 
     signals.push({
       id: `${sport.id}-${ticker}-${Date.now()}`,
@@ -574,7 +832,13 @@ async function scanSport(sport: SportConfig): Promise<SportsSignal[]> {
       reasoning,
       confidence,
       riskLevel,
-      dataSource: matchedEvent ? "ESPN + Kalshi" : "Kalshi",
+      dataSource: [
+        "Kalshi",
+        matchedEvent ? "ESPN Live" : null,
+        staleInfo.isStale ? "Stale-Detect" : null,
+        crossMarketAlpha > 0.02 ? "Cross-Mkt" : null,
+        comebackRate !== null ? "Comeback-Model" : null,
+      ].filter(Boolean).join(" + "),
       createdAt: new Date().toISOString(),
       isLive,
       score: scoreStr,
