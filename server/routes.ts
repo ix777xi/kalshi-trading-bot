@@ -1789,21 +1789,53 @@ export async function registerRoutes(
       // Add exit signals to pending trades queue
       const existing = await storage.getPendingTrades("pending");
       const existingExitTickers = new Set(
-        existing.filter((t: any) => ["trailing_stop", "time_decay_exit", "profit_target_60pct", "edge_erosion"].includes(t.edgeSource))
+        existing.filter((t: any) => ["trailing_stop", "time_decay_exit", "profit_target_60pct", "profit_threshold_50", "edge_erosion"].includes(t.edgeSource))
           .map((t: any) => t.ticker)
       );
+
+      let capitalFreed = 0; // Track freed capital for reinvestment scan
 
       for (const sig of exitSignals) {
         if (existingExitTickers.has(sig.ticker)) continue;
 
         const priceCents = Math.round(sig.marketPrice * 100);
-        const contracts = 50; // Sell full position
+        // Match actual position quantity from DB
+        const posRow = posRows.find(p => p.ticker === sig.ticker);
+        const contracts = posRow ? posRow.quantity : 50;
         const estimatedValue = parseFloat((contracts * sig.marketPrice).toFixed(2));
+
+        const side = sig.signalType === "SELL_YES" ? "yes" : "no";
+
+        // In supervised/autonomous mode: auto-execute sell signals immediately
+        let tradeStatus = "pending";
+        let autoExecuted = false;
+
+        if (currentMode === "autonomous" || currentMode === "supervised") {
+          const execResult = await autoExecuteTrade(sig.ticker, side, "sell", contracts, priceCents);
+          if (execResult.ok) {
+            tradeStatus = "executed";
+            autoExecuted = true;
+            capitalFreed += estimatedValue;
+            console.log(`[Exit Monitor] AUTO-SOLD: ${sig.ticker} (${sig.edgeSource}) — $${estimatedValue.toFixed(2)} freed`);
+
+            await storage.createAuditLog({
+              eventType: "ORDER_PLACED",
+              ticker: sig.ticker,
+              description: `[AUTO-SELL] ${sig.edgeSource.toUpperCase()}: SELL ${side.toUpperCase()} ${contracts} @ ${priceCents}¢ | $${estimatedValue.toFixed(2)} freed for reinvestment`,
+              amount: estimatedValue,
+              status: "ok",
+              createdAt: new Date().toISOString(),
+            });
+          } else {
+            console.log(`[Exit Monitor] Auto-sell failed for ${sig.ticker}: ${execResult.error}`);
+            // Falls through to pending status
+          }
+        }
 
         await storage.createPendingTrade({
           ticker: sig.ticker,
           title: sig.title,
-          side: sig.signalType === "SELL_YES" ? "yes" : "no",
+          side,
           action: "sell",
           contracts,
           priceCents,
@@ -1816,19 +1848,27 @@ export async function registerRoutes(
           modelName: sig.modelName,
           edgeSource: sig.edgeSource,
           reasoning: sig.reasoning,
-          status: "pending",
+          status: tradeStatus,
           createdAt: new Date().toISOString(),
-          decidedAt: null,
-          executedAt: null,
+          decidedAt: autoExecuted ? new Date().toISOString() : null,
+          executedAt: autoExecuted ? new Date().toISOString() : null,
           orderId: null,
           errorMessage: null,
           gapType: sig.gapType || null,
           executableEdge: sig.executableEdge || null,
           kellySize: sig.kellySize || null,
-          autoExecuted: false,
+          autoExecuted,
         });
 
-        console.log(`[Exit Monitor] Queued ${sig.edgeSource} exit for ${sig.ticker}`);
+        console.log(`[Exit Monitor] ${autoExecuted ? "Auto-sold" : "Queued"}: ${sig.edgeSource} exit for ${sig.ticker}`);
+      }
+
+      // ── Reinvestment Scan: after profitable sells, look for new opportunities ──
+      if (capitalFreed > 0 && (currentMode === "autonomous" || currentMode === "supervised")) {
+        console.log(`[Reinvestment] $${capitalFreed.toFixed(2)} freed from auto-sells — scanning for dip/momentum opportunities...`);
+        // Trigger immediate signal scan to find reinvestment opportunities
+        // The normal scan loop will pick up new BUY signals and execute them
+        setTimeout(() => runSignalScan(), 2_000);
       }
     } catch (e) {
       console.error("[Exit Monitor] Error:", e);

@@ -828,6 +828,111 @@ export function getCategoryMultiplier(edgeSource: string, ticker: string): numbe
   return 0.5; // Default
 }
 
+// ── Dip / Momentum Detection ─────────────────────────────────────────────────
+// Detects two patterns for autonomous reinvestment after profit-taking:
+// 1. DIP BUY: Market price dropped significantly below recent levels → buy the dip
+// 2. MOMENTUM RIDE: Market is surging toward certainty → buy and ride the wave
+
+// In-memory price history for dip/momentum detection (ticker → recent prices)
+const priceHistory: Map<string, { prices: number[]; lastUpdated: number }> = new Map();
+
+function analyzeDipAndMomentum(market: KalshiMarket): LiveSignal | null {
+  const yesBid = parseFloat(market.yes_bid_dollars || "0");
+  const noBid = parseFloat(market.no_bid_dollars || "0");
+  const yesAsk = parseFloat(market.yes_ask_dollars || "0");
+  if (yesBid <= 0 && noBid <= 0) return null;
+  const midPrice = yesBid > 0 ? (yesBid + yesAsk) / 2 : (1 - noBid);
+  if (midPrice <= 0.02 || midPrice >= 0.98) return null;
+
+  const volume = parseFloat(market.volume_fp || "0");
+  if (volume < 200) return null; // need decent liquidity
+  const spread = Math.max(0, yesAsk - yesBid);
+  if (spread > 0.08) return null; // too wide
+
+  // Update price history
+  const now = Date.now();
+  const history = priceHistory.get(market.ticker);
+  if (history) {
+    history.prices.push(midPrice);
+    if (history.prices.length > 30) history.prices.shift(); // keep last 30 readings (~30 min at 60s intervals)
+    history.lastUpdated = now;
+  } else {
+    priceHistory.set(market.ticker, { prices: [midPrice], lastUpdated: now });
+    return null; // Need at least 2 readings
+  }
+
+  const prices = priceHistory.get(market.ticker)!.prices;
+  if (prices.length < 5) return null; // Need 5+ readings for meaningful analysis
+
+  const recentAvg = prices.slice(-5).reduce((a, b) => a + b, 0) / Math.min(prices.length, 5);
+  const olderAvg = prices.length >= 10
+    ? prices.slice(0, -5).reduce((a, b) => a + b, 0) / (prices.length - 5)
+    : recentAvg;
+
+  const priceChange = recentAvg - olderAvg;
+  const pctChange = olderAvg > 0 ? (priceChange / olderAvg) : 0;
+
+  const oi = parseFloat(market.open_interest_fp || "0");
+  const depth = Math.max(0, Math.round(Math.min(oi * 0.08, volume * 0.5)));
+  if (depth < 48) return null;
+
+  const categoryMult = getCategoryMultiplier("", market.ticker);
+
+  // DIP BUY: price dropped 8%+ from older average → buy the dip
+  if (pctChange <= -0.08 && midPrice >= 0.15 && midPrice <= 0.75) {
+    const execEdge = Math.abs(pctChange) - spread / 2;
+    if (execEdge < 0.04) return null;
+    return {
+      ticker: market.ticker,
+      title: market.title,
+      eventTicker: market.event_ticker,
+      edgeScore: parseFloat((pctChange * 100).toFixed(2)),
+      trueProbability: olderAvg, // revert-to-mean estimate
+      marketPrice: midPrice,
+      signalType: "BUY_YES",
+      modelConfidence: Math.min(0.85, 0.70 + Math.abs(pctChange)),
+      modelName: "Dip-Detector",
+      edgeSource: "dip_buy",
+      reasoning: `DIP BUY: Price dropped ${(pctChange * 100).toFixed(1)}% (from ~${(olderAvg * 100).toFixed(0)}¢ avg to ${(midPrice * 100).toFixed(0)}¢). Mean-reversion opportunity — markets overcorrect on short-term sentiment shifts. Buying the dip with ${(execEdge * 100).toFixed(1)}% executable edge after spread. Category multiplier: ${categoryMult.toFixed(1)}×.`,
+      riskLevel: Math.abs(pctChange) > 0.15 ? "medium" : "low",
+      createdAt: new Date().toISOString(),
+      gapType: "E",
+      spread,
+      executableEdge: execEdge,
+      liquidityDepth: depth,
+      kellySize: calculateDynamicKelly(execEdge, 0.75, 12000, midPrice, depth, categoryMult),
+    };
+  }
+
+  // MOMENTUM RIDE: price surged 8%+ and trending toward certainty → ride the wave
+  if (pctChange >= 0.08 && midPrice >= 0.55 && midPrice <= 0.88) {
+    const execEdge = Math.abs(pctChange) * 0.6 - spread / 2; // discount for chasing
+    if (execEdge < 0.03) return null;
+    return {
+      ticker: market.ticker,
+      title: market.title,
+      eventTicker: market.event_ticker,
+      edgeScore: parseFloat((pctChange * 100).toFixed(2)),
+      trueProbability: Math.min(0.95, midPrice + pctChange * 0.5),
+      marketPrice: midPrice,
+      signalType: "BUY_YES",
+      modelConfidence: Math.min(0.82, 0.65 + pctChange),
+      modelName: "Momentum-Scanner",
+      edgeSource: "momentum_ride",
+      reasoning: `MOMENTUM BUY: Price surged +${(pctChange * 100).toFixed(1)}% (from ~${(olderAvg * 100).toFixed(0)}¢ to ${(midPrice * 100).toFixed(0)}¢). Strong directional move with volume confirmation (${volume.toFixed(0)} traded). Riding momentum toward resolution — ${(execEdge * 100).toFixed(1)}% executable edge after spread discount.`,
+      riskLevel: "medium",
+      createdAt: new Date().toISOString(),
+      gapType: "E",
+      spread,
+      executableEdge: execEdge,
+      liquidityDepth: depth,
+      kellySize: calculateDynamicKelly(execEdge, 0.72, 12000, midPrice, depth, categoryMult),
+    };
+  }
+
+  return null;
+}
+
 // ── Main Signal Generation ────────────────────────────────────────────────────
 
 export async function generateLiveSignals(existingPositions?: PositionInfo[]): Promise<LiveSignal[]> {
@@ -872,6 +977,10 @@ export async function generateLiveSignals(existingPositions?: PositionInfo[]): P
       // Edge #8: Stale pricing detection
       const stalePriceSignal = analyzeStalePrice(market);
       if (stalePriceSignal) allSignals.push(stalePriceSignal);
+
+      // Edge #11: Dip buying / momentum detection (for reinvestment after sells)
+      const dipMomentumSignal = analyzeDipAndMomentum(market);
+      if (dipMomentumSignal) allSignals.push(dipMomentumSignal);
 
       // Run risk exit analysis if we have positions
       if (existingPositions && existingPositions.length > 0) {
@@ -1005,7 +1114,36 @@ export async function checkPositionExits(
       }
     }
 
-    // ── EXIT #3: Profit target — 60% of max theoretical gain ─────────────────
+    // ── EXIT #3a: Absolute profit target — $50 unrealized gain ─────────────────
+    // Hard dollar threshold: lock in gains once position is up $50+
+    const PROFIT_SELL_THRESHOLD = 50; // dollars
+    if (pnlDollars >= PROFIT_SELL_THRESHOLD) {
+      const costBasis = pos.entryPrice * pos.quantity * 100;
+      const returnPct = costBasis > 0 ? (pnlDollars / costBasis * 100) : 0;
+      exitSignals.push({
+        ticker: pos.ticker,
+        title: pos.title || pos.ticker,
+        eventTicker: pos.ticker,
+        edgeScore: parseFloat(returnPct.toFixed(2)),
+        trueProbability: pos.currentPrice,
+        marketPrice: pos.currentPrice,
+        signalType: isYes ? "SELL_YES" : "SELL_NO",
+        modelConfidence: 0.95,
+        modelName: "Exit-Monitor",
+        edgeSource: "profit_threshold_50",
+        reasoning: `AUTO-SELL: PROFIT TARGET HIT. Unrealized gain of $${pnlDollars.toFixed(2)} exceeds $${PROFIT_SELL_THRESHOLD} threshold (${returnPct.toFixed(0)}% return on $${costBasis.toFixed(2)} cost basis). Locking in profits — capital will be freed for new opportunities on dips and price moves.`,
+        riskLevel: "low",
+        createdAt: new Date().toISOString(),
+        gapType: "D",
+        spread: 0,
+        executableEdge: 0,
+        liquidityDepth: 0,
+        kellySize: 0,
+      });
+      continue;
+    }
+
+    // ── EXIT #3b: Profit target — 60% of max theoretical gain ─────────────────
     // Max theoretical: entry price to $1 (per contract in dollars)
     const maxTheoreticalPerContract = isYes ? (1 - pos.entryPrice) : pos.entryPrice;
     const maxTheoreticalTotal = maxTheoreticalPerContract * pos.quantity * 100; // cents to dollars
