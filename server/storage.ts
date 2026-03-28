@@ -11,10 +11,11 @@ import {
   type BacktestResult, backtestResults,
   type EquityCurve, equityCurve,
   type Settings, type InsertSettings, settings,
+  type PendingTrade, type InsertPendingTrade, pendingTrades,
 } from "@shared/schema";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { sqlite } from "./db";
-import { eq, desc } from "drizzle-orm";
+import { eq, desc, and } from "drizzle-orm";
 
 export { sqlite };
 export const db = drizzle(sqlite);
@@ -42,6 +43,12 @@ export interface IStorage {
   getEquityCurve(backtestId: number): Promise<EquityCurve[]>;
   getSettings(): Promise<Settings | undefined>;
   updateSettings(s: Partial<InsertSettings>): Promise<Settings>;
+  // Pending Trades (HITL)
+  getPendingTrades(status?: string): Promise<PendingTrade[]>;
+  getPendingTradeById(id: number): Promise<PendingTrade | undefined>;
+  createPendingTrade(data: InsertPendingTrade): Promise<PendingTrade>;
+  updatePendingTradeStatus(id: number, status: string, extra?: { orderId?: string; errorMessage?: string; decidedAt?: string; executedAt?: string }): Promise<PendingTrade>;
+  updatePendingTrade(id: number, data: { contracts?: number; priceCents?: number }): Promise<PendingTrade>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -125,6 +132,44 @@ export class DatabaseStorage implements IStorage {
         .returning().get();
     }
     return db.insert(settings).values({ ...s as InsertSettings, updatedAt: new Date().toISOString() }).returning().get();
+  }
+
+  // ── Pending Trades (HITL) ────────────────────────────────────────────────────
+  async getPendingTrades(status?: string): Promise<PendingTrade[]> {
+    if (status) {
+      return db.select().from(pendingTrades)
+        .where(eq(pendingTrades.status, status))
+        .orderBy(desc(pendingTrades.createdAt)).all();
+    }
+    return db.select().from(pendingTrades).orderBy(desc(pendingTrades.createdAt)).all();
+  }
+
+  async getPendingTradeById(id: number): Promise<PendingTrade | undefined> {
+    return db.select().from(pendingTrades).where(eq(pendingTrades.id, id)).get();
+  }
+
+  async createPendingTrade(data: InsertPendingTrade): Promise<PendingTrade> {
+    return db.insert(pendingTrades).values(data).returning().get();
+  }
+
+  async updatePendingTradeStatus(
+    id: number,
+    status: string,
+    extra?: { orderId?: string; errorMessage?: string; decidedAt?: string; executedAt?: string }
+  ): Promise<PendingTrade> {
+    const update: any = { status };
+    if (extra?.orderId !== undefined) update.orderId = extra.orderId;
+    if (extra?.errorMessage !== undefined) update.errorMessage = extra.errorMessage;
+    if (extra?.decidedAt !== undefined) update.decidedAt = extra.decidedAt;
+    if (extra?.executedAt !== undefined) update.executedAt = extra.executedAt;
+    return db.update(pendingTrades).set(update).where(eq(pendingTrades.id, id)).returning().get();
+  }
+
+  async updatePendingTrade(id: number, data: { contracts?: number; priceCents?: number }): Promise<PendingTrade> {
+    const update: any = {};
+    if (data.contracts !== undefined) update.contracts = data.contracts;
+    if (data.priceCents !== undefined) update.priceCents = data.priceCents;
+    return db.update(pendingTrades).set(update).where(eq(pendingTrades.id, id)).returning().get();
   }
 }
 

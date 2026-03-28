@@ -17,13 +17,21 @@ import {
 } from "@/components/ui/alert-dialog";
 import { useState, useEffect } from "react";
 import { useToast } from "@/hooks/use-toast";
-import { Save, Play, Pause, Square, Key, Bell, Bot, Cpu, Wifi, WifiOff, TestTube, Trash2, CheckCircle2, XCircle } from "lucide-react";
+import { Save, Play, Pause, Square, Key, Bell, Bot, Cpu, Wifi, WifiOff, TestTube, Trash2, CheckCircle2, XCircle, Sliders, AlertOctagon } from "lucide-react";
 
 type Settings = {
   id: number; kalshiApiKey: string; kalshiApiKeyId: string;
   hasPrivateKey: boolean;
   notifyOnSignal: boolean; notifyOnFill: boolean; minEdgeAlert: number;
   scanFrequency: number; llmModel: string; updatedAt: string;
+};
+
+type BotConfig = {
+  botMode: string;
+  autoMinEdge: number;
+  autoMinConfidence: number;
+  autoMaxContracts: number;
+  autoMaxCost: number;
 };
 
 type Portfolio = { botStatus: string };
@@ -41,17 +49,24 @@ export default function SettingsPage() {
     queryKey: ["/api/portfolio"],
   });
 
+  const { data: botConfig } = useQuery<BotConfig>({
+    queryKey: ["/api/bot/config"],
+  });
+
   const [form, setForm] = useState<Partial<Settings & { kalshiPrivateKey: string }>>({});
+  const [botForm, setBotForm] = useState<Partial<BotConfig>>({});
   const [privateKeyInput, setPrivateKeyInput] = useState("");
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>("idle");
   const [connectionMsg, setConnectionMsg] = useState("");
   const [showClearKeyConfirm, setShowClearKeyConfirm] = useState(false);
 
   useEffect(() => {
-    if (settings) {
-      setForm(settings);
-    }
+    if (settings) setForm(settings);
   }, [settings]);
+
+  useEffect(() => {
+    if (botConfig) setBotForm(botConfig);
+  }, [botConfig]);
 
   const updateSettings = useMutation({
     mutationFn: (data: Partial<Settings & { kalshiPrivateKey: string }>) =>
@@ -67,6 +82,17 @@ export default function SettingsPage() {
     },
     onError: (e: any) => {
       toast({ title: "Save failed", description: e?.message || "Failed to save settings", variant: "destructive" });
+    },
+  });
+
+  const saveBotConfig = useMutation({
+    mutationFn: (data: Partial<BotConfig>) => apiRequest("PUT", "/api/bot/config", data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/bot/config"] });
+      toast({ title: "Bot config saved", description: "Signal scanner thresholds updated." });
+    },
+    onError: (e: any) => {
+      toast({ title: "Save failed", description: e?.message, variant: "destructive" });
     },
   });
 
@@ -278,6 +304,88 @@ export default function SettingsPage() {
               )}
             </>
           )}
+        </CardContent>
+      </Card>
+
+      {/* Trading Bot Configuration */}
+      <Card>
+        <CardHeader className="p-4 pb-2 flex flex-row items-center gap-2">
+          <Sliders className="w-4 h-4 text-primary" />
+          <CardTitle className="text-sm font-medium">Trading Bot Configuration</CardTitle>
+        </CardHeader>
+        <CardContent className="p-4 pt-0 space-y-5">
+          <p className="text-xs text-muted-foreground">
+            The bot scans live Kalshi markets every 60 seconds and queues trades for your approval in the HITL page.
+          </p>
+
+          {/* Min Edge Threshold */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <Label className="text-xs text-muted-foreground">Min Edge Threshold</Label>
+              <span className="text-xs font-medium mono">{botForm.autoMinEdge ?? 5}%</span>
+            </div>
+            <Slider
+              data-testid="slider-min-edge"
+              min={3} max={20} step={0.5}
+              value={[botForm.autoMinEdge ?? 5]}
+              onValueChange={([v]) => setBotForm(f => ({ ...f, autoMinEdge: v }))}
+            />
+            <p className="text-[10px] text-muted-foreground">Minimum edge % for a signal to become a pending trade.</p>
+          </div>
+
+          {/* Min Confidence */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <Label className="text-xs text-muted-foreground">Min Model Confidence</Label>
+              <span className="text-xs font-medium mono">{botForm.autoMinConfidence ?? 75}%</span>
+            </div>
+            <Slider
+              data-testid="slider-min-confidence"
+              min={50} max={95} step={1}
+              value={[botForm.autoMinConfidence ?? 75]}
+              onValueChange={([v]) => setBotForm(f => ({ ...f, autoMinConfidence: v }))}
+            />
+            <p className="text-[10px] text-muted-foreground">Minimum model confidence required to queue a trade.</p>
+          </div>
+
+          {/* Max Contracts */}
+          <div className="space-y-1.5">
+            <Label className="text-xs text-muted-foreground">Max Contracts per Trade</Label>
+            <Input
+              data-testid="input-max-contracts"
+              type="number"
+              min={1}
+              max={1000}
+              value={botForm.autoMaxContracts ?? 50}
+              onChange={e => setBotForm(f => ({ ...f, autoMaxContracts: parseInt(e.target.value) || 50 }))}
+              className="h-9 text-sm mono w-32"
+            />
+          </div>
+
+          {/* Max Cost */}
+          <div className="space-y-1.5">
+            <Label className="text-xs text-muted-foreground">Max Cost per Trade ($)</Label>
+            <Input
+              data-testid="input-max-cost"
+              type="number"
+              min={1}
+              max={10000}
+              value={botForm.autoMaxCost ?? 50}
+              onChange={e => setBotForm(f => ({ ...f, autoMaxCost: parseFloat(e.target.value) || 50 }))}
+              className="h-9 text-sm mono w-32"
+            />
+          </div>
+
+          <Button
+            size="sm"
+            data-testid="button-save-bot-config"
+            onClick={() => saveBotConfig.mutate(botForm)}
+            disabled={saveBotConfig.isPending}
+            className="w-full"
+          >
+            <Save className="w-3.5 h-3.5 mr-1.5" />
+            {saveBotConfig.isPending ? "Saving..." : "Save Bot Configuration"}
+          </Button>
         </CardContent>
       </Card>
 

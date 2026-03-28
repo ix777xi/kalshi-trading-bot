@@ -181,6 +181,36 @@ export const insertSettingsSchema = createInsertSchema(settings).omit({ id: true
 export type InsertSettings = z.infer<typeof insertSettingsSchema>;
 export type Settings = typeof settings.$inferSelect;
 
+// ── Pending Trades (HITL queue) ─────────────────────────────────────────────
+export const pendingTrades = sqliteTable("pending_trades", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  ticker: text("ticker").notNull(),
+  title: text("title").notNull(),
+  side: text("side").notNull(), // 'yes' | 'no'
+  action: text("action").notNull().default("buy"),
+  contracts: integer("contracts").notNull(),
+  priceCents: integer("price_cents").notNull(),
+  estimatedCost: real("estimated_cost").notNull(),
+  maxProfit: real("max_profit").notNull(),
+  edgeScore: real("edge_score").notNull(),
+  trueProbability: real("true_probability").notNull(),
+  marketPrice: real("market_price").notNull(),
+  modelConfidence: real("model_confidence").notNull(),
+  modelName: text("model_name").notNull(),
+  edgeSource: text("edge_source").notNull(),
+  reasoning: text("reasoning").notNull(),
+  status: text("status").notNull().default("pending"), // 'pending' | 'approved' | 'rejected' | 'modified' | 'executed' | 'failed'
+  createdAt: text("created_at").notNull(),
+  decidedAt: text("decided_at"),
+  executedAt: text("executed_at"),
+  orderId: text("order_id"),
+  errorMessage: text("error_message"),
+});
+
+export const insertPendingTradeSchema = createInsertSchema(pendingTrades).omit({ id: true });
+export type InsertPendingTrade = z.infer<typeof insertPendingTradeSchema>;
+export type PendingTrade = typeof pendingTrades.$inferSelect;
+
 // ── Users (keep for auth) ─────────────────────────────────────────────────────
 export const users = sqliteTable("users", {
   id: integer("id").primaryKey({ autoIncrement: true }),

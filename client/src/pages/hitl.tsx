@@ -7,296 +7,443 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Slider } from "@/components/ui/slider";
 import { Skeleton } from "@/components/ui/skeleton";
-import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
-import { TrendingUp, TrendingDown, Target, Shield, DollarSign, CheckCircle2, AlertTriangle, Zap, User } from "lucide-react";
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
+  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle
+} from "@/components/ui/alert-dialog";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import {
+  TrendingUp, TrendingDown, Target, Shield, DollarSign, CheckCircle2,
+  AlertTriangle, Zap, User, Clock, ChevronDown, X, Edit3, Activity,
+  Cloud, BarChart3, Layers
+} from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
-// ── Event mapping ─────────────────────────────────────────────────────────────
+// ── Types ─────────────────────────────────────────────────────────────────────
 
-const EVENT_MAP: Record<string, { name: string; category: string; description: string }> = {
-  "PRES-2024-D": { name: "Democratic Presidential Win", category: "Politics", description: "Will the Democratic candidate win the 2024 Presidential election?" },
-  "FED-RATE-JUL": { name: "Fed Rate Cut — July", category: "Economics", description: "Will the Federal Reserve cut interest rates at the July FOMC meeting?" },
-  "NBA-EAST-BOS": { name: "Celtics Win Eastern Conference", category: "Sports", description: "Will the Boston Celtics win the NBA Eastern Conference finals?" },
-  "TEMP-NYC-JUL": { name: "NYC Heat Wave — July", category: "Weather", description: "Will the average temperature in NYC exceed 85°F during July?" },
-  "AAPL-1T-2024": { name: "Apple $1T Market Cap", category: "Technology", description: "Will Apple's market capitalization reach $1 trillion by end of 2024?" },
-  "BTC-100K-Q3": { name: "Bitcoin Above $100K", category: "Crypto", description: "Will Bitcoin trade above $100,000 at any point during Q3?" },
-  "UK-ELEC-LAB": { name: "Labour Wins UK Election", category: "Politics", description: "Will the Labour Party win the next UK general election?" },
-  "GDP-US-Q2": { name: "US GDP Growth > 2.5%", category: "Economics", description: "Will US real GDP growth exceed 2.5% annualized in Q2?" },
-  "SUPERBOWL-KC": { name: "Chiefs Win Super Bowl LIX", category: "Sports", description: "Will the Kansas City Chiefs win Super Bowl LIX?" },
-  "CPI-3PCT-AUG": { name: "CPI Below 3% — August", category: "Economics", description: "Will the Consumer Price Index year-over-year reading fall below 3% in August?" },
-  "EURO24-ESP": { name: "Spain Wins Euro 2024", category: "Sports", description: "Will Spain win the UEFA Euro 2024 tournament?" },
-  "OIL-80-Q4": { name: "Crude Oil Above $80 — Q4", category: "Commodities", description: "Will WTI crude oil prices stay above $80/barrel through Q4?" },
-  "SENATE-DEM": { name: "Democrats Hold Senate", category: "Politics", description: "Will the Democratic Party maintain control of the US Senate?" },
-  "NVDA-500B": { name: "Nvidia $500B+ Market Cap", category: "Technology", description: "Will Nvidia's market capitalization exceed $500 billion?" },
-  "RAIN-LA-JUN": { name: "Rain in Los Angeles — June", category: "Weather", description: "Will measurable rainfall (>0.01 in) occur in Los Angeles during June?" },
-  "FED-HIKE-SEP": { name: "Fed Rate Hike — September", category: "Economics", description: "Will the Federal Reserve raise interest rates at the September FOMC meeting?" },
-  "NFLX-200M": { name: "Netflix 200M Subscribers", category: "Technology", description: "Will Netflix reach 200 million paid subscribers globally?" },
-  "TSLA-250": { name: "Tesla Above $250", category: "Technology", description: "Will Tesla stock trade above $250 during Q3?" },
-  "EURO-PAR": { name: "Euro Parity with USD", category: "Economics", description: "Will the EUR/USD exchange rate reach 1:1 parity?" },
-  "UNEM-4PCT": { name: "Unemployment Above 4%", category: "Economics", description: "Will the US unemployment rate rise above 4%?" },
+type PendingTrade = {
+  id: number;
+  ticker: string;
+  title: string;
+  side: string;
+  action: string;
+  contracts: number;
+  priceCents: number;
+  estimatedCost: number;
+  maxProfit: number;
+  edgeScore: number;
+  trueProbability: number;
+  marketPrice: number;
+  modelConfidence: number;
+  modelName: string;
+  edgeSource: string;
+  reasoning: string;
+  status: string;
+  createdAt: string;
+  decidedAt: string | null;
+  executedAt: string | null;
+  orderId: string | null;
+  errorMessage: string | null;
 };
 
-function getEventInfo(ticker: string) {
-  return EVENT_MAP[ticker] || { name: ticker, category: "Other", description: `Prediction market contract: ${ticker}` };
-}
+type SettingsData = { hasPrivateKey: boolean };
 
-function getEdgeType(ticker: string): { label: string; color: string } {
-  const t = ticker.toUpperCase();
-  if (/TEMP|RAIN|WEATH|HIGH|LOW|SNOW/i.test(t)) return { label: "Weather", color: "bg-cyan-500/20 text-cyan-400 border-cyan-500/30" };
-  if (/FED|CPI|GDP|UNEM|RATE/i.test(t)) return { label: "Macro", color: "bg-blue-500/20 text-blue-400 border-blue-500/30" };
-  if (/NBA|NFL|NHL|MLB|SUPERBOWL/i.test(t)) return { label: "Sports", color: "bg-orange-500/20 text-orange-400 border-orange-500/30" };
-  if (/BTC|ETH|CRYPTO/i.test(t)) return { label: "Crypto", color: "bg-yellow-500/20 text-yellow-400 border-yellow-500/30" };
-  if (/PRES|SENATE|ELEC|GOV/i.test(t)) return { label: "Politics", color: "bg-purple-500/20 text-purple-400 border-purple-500/30" };
-  return { label: "Market", color: "bg-gray-500/20 text-gray-400 border-gray-500/30" };
-}
+// ── Helper functions ──────────────────────────────────────────────────────────
 
-function getReasoning(sig: Signal): string {
-  const event = getEventInfo(sig.ticker);
-  const trueProb = (sig.trueProbability * 100).toFixed(0);
-  const mktPrice = (sig.marketPrice * 100).toFixed(0);
-  const edge = Math.abs(sig.edgeScore).toFixed(1);
-
-  if (sig.signalType === "BUY_YES") {
-    if (sig.marketPrice > 0.6) return `${event.name} is underpriced at ${mktPrice}¢. Our model sees ${trueProb}% true probability — a +${edge}% edge. Historically, favorites above 50¢ outperform implied probability.`;
-    if (/TEMP|RAIN|WEATH/i.test(sig.ticker)) return `GFS weather ensemble forecasts diverge from crowd pricing on ${event.name}. Model: ${trueProb}% vs market ${mktPrice}¢. Weather models have shown 85-90% win rates when divergence is this large.`;
-    if (/FED|CPI|GDP/i.test(sig.ticker)) return `Kalshi's implied probability on ${event.name} diverges from consensus forecasts. When Kalshi diverges >0.1pp from Bloomberg consensus, it's right 75-81% of the time. Edge: +${edge}%.`;
-    return `${event.name} appears underpriced at ${mktPrice}¢. Our ${sig.modelName} model estimates ${trueProb}% true probability — a +${edge}% edge after fees.`;
+function getEdgeSourceInfo(edgeSource: string): { label: string; color: string; icon: typeof BarChart3 } {
+  switch (edgeSource) {
+    case "favorite_longshot_bias":
+      return { label: "Longshot Bias", color: "bg-orange-500/20 text-orange-400 border-orange-500/30", icon: TrendingDown };
+    case "yes_no_asymmetry":
+      return { label: "YES/NO Asymmetry", color: "bg-purple-500/20 text-purple-400 border-purple-500/30", icon: Activity };
+    case "weather_model":
+      return { label: "Weather GFS", color: "bg-cyan-500/20 text-cyan-400 border-cyan-500/30", icon: Cloud };
+    case "market_maker_spread":
+      return { label: "Spread Structure", color: "bg-blue-500/20 text-blue-400 border-blue-500/30", icon: Layers };
+    default:
+      return { label: edgeSource, color: "bg-gray-500/20 text-gray-400 border-gray-500/30", icon: BarChart3 };
   }
-
-  if (sig.signalType === "BUY_NO") {
-    if (sig.marketPrice < 0.2) return `Classic longshot bias on ${event.name}. At ${mktPrice}¢, YES buyers average -41% EV while NO buyers average +23%. Sell YES / buy NO to capture the optimism premium.`;
-    if (/NBA|NFL|SUPERBOWL/i.test(sig.ticker)) return `Fan loyalty bias is inflating ${event.name} at ${mktPrice}¢. Sports markets carry a 2.23pp maker-taker gap. Selling against emotional YES buyers is high-structural-alpha.`;
-    return `${event.name} is overpriced at ${mktPrice}¢. Model sees only ${trueProb}% true probability — a ${edge}% edge favoring NO. NO outperforms YES at 69 of 99 price levels on Kalshi.`;
-  }
-
-  return "";
 }
 
-type Signal = {
-  id: number; ticker: string; edgeScore: number; trueProbability: number;
-  marketPrice: number; signalType: string; modelConfidence: number;
-  modelName: string; createdAt: string;
-};
+function getStatusBadge(status: string) {
+  switch (status) {
+    case "pending":
+    case "modified":
+      return <Badge variant="outline" className="text-amber-400 border-amber-500/40 text-[10px]">Pending</Badge>;
+    case "executed":
+      return <Badge variant="outline" className="text-profit border-profit/40 text-[10px]">Executed</Badge>;
+    case "approved":
+      return <Badge variant="outline" className="text-blue-400 border-blue-500/40 text-[10px]">Approved</Badge>;
+    case "rejected":
+      return <Badge variant="outline" className="text-loss border-loss/40 text-[10px]">Rejected</Badge>;
+    case "failed":
+      return <Badge variant="outline" className="text-red-400 border-red-500/40 text-[10px]">Failed</Badge>;
+    default:
+      return <Badge variant="outline" className="text-[10px]">{status}</Badge>;
+  }
+}
 
-type Settings = { hasPrivateKey: boolean };
+function timeAgo(isoString: string): string {
+  const diff = Date.now() - new Date(isoString).getTime();
+  const mins = Math.floor(diff / 60_000);
+  const hrs = Math.floor(mins / 60);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${Math.floor(hrs / 24)}d ago`;
+}
 
-// ── Trade Card Component ──────────────────────────────────────────────────────
+// ── Trade Card (Pending) ──────────────────────────────────────────────────────
 
-function TradeCard({ sig, hasPrivateKey }: { sig: Signal; hasPrivateKey: boolean }) {
-  const [contracts, setContracts] = useState(10);
+function PendingTradeCard({ trade, hasPrivateKey }: { trade: PendingTrade; hasPrivateKey: boolean }) {
   const [showConfirm, setShowConfirm] = useState(false);
-  const [executed, setExecuted] = useState(false);
+  const [showModify, setShowModify] = useState(false);
+  const [modContracts, setModContracts] = useState(trade.contracts);
+  const [modPriceCents, setModPriceCents] = useState(trade.priceCents);
   const { toast } = useToast();
 
-  const event = getEventInfo(sig.ticker);
-  const edgeType = getEdgeType(sig.ticker);
-  const isYes = sig.signalType === "BUY_YES";
-  const side = isYes ? "yes" : "no";
-  const action = "buy";
-  const priceCents = Math.round(sig.marketPrice * 100);
-  const pricePerContract = sig.marketPrice;
-  const estimatedCost = (contracts * pricePerContract).toFixed(2);
-  const potentialProfit = (contracts * (1 - pricePerContract)).toFixed(2);
-  const reasoning = getReasoning(sig);
+  const edgeSourceInfo = getEdgeSourceInfo(trade.edgeSource);
+  const EdgeIcon = edgeSourceInfo.icon;
+  const isYes = trade.side === "yes";
 
-  const placeTrade = useMutation({
+  const modCost = ((modContracts * modPriceCents) / 100).toFixed(2);
+  const modProfit = ((modContracts * (100 - modPriceCents)) / 100).toFixed(2);
+
+  const approveMutation = useMutation({
     mutationFn: async () => {
-      const body = {
-        ticker: sig.ticker,
-        side,
-        action,
-        count: contracts,
-        type: "limit",
-        yes_price: isYes ? priceCents : undefined,
-        no_price: !isYes ? (100 - priceCents) : undefined,
-        client_order_id: crypto.randomUUID(),
-        post_only: true,
-      };
-      return apiRequest("POST", "/api/live/orders", body);
+      const res = await apiRequest("POST", `/api/pending-trades/${trade.id}/approve`, {});
+      return res.json();
     },
-    onSuccess: () => {
-      setExecuted(true);
-      queryClient.invalidateQueries({ queryKey: ["/api/live/orders"] });
-      toast({ title: "Order placed", description: `${contracts} contracts ${side.toUpperCase()} on ${event.name} at ${priceCents}¢` });
+    onSuccess: (data: any) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/pending-trades"] });
+      if (data?.success) {
+        toast({ title: "Order Placed", description: `Order ID: ${data.orderId}` });
+      } else {
+        toast({ title: "Trade Approved", description: "Status updated." });
+      }
     },
     onError: (err: any) => {
-      toast({ title: "Trade failed", description: err?.message || "Could not place order", variant: "destructive" });
+      queryClient.invalidateQueries({ queryKey: ["/api/pending-trades"] });
+      toast({
+        title: "Execution Failed",
+        description: err?.message || "Could not place order",
+        variant: "destructive",
+      });
     },
   });
 
-  const handleConfirmTrade = () => {
-    setShowConfirm(false);
-    placeTrade.mutate();
-  };
+  const rejectMutation = useMutation({
+    mutationFn: () => apiRequest("POST", `/api/pending-trades/${trade.id}/reject`, {}),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/pending-trades"] });
+      toast({ title: "Trade Rejected", description: `${trade.ticker} moved to history.` });
+    },
+    onError: (err: any) => {
+      toast({ title: "Error", description: err?.message, variant: "destructive" });
+    },
+  });
+
+  const modifyMutation = useMutation({
+    mutationFn: () =>
+      apiRequest("POST", `/api/pending-trades/${trade.id}/modify`, {
+        contracts: modContracts,
+        priceCents: modPriceCents,
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/pending-trades"] });
+      setShowModify(false);
+      toast({ title: "Trade Modified", description: `Updated to ${modContracts} contracts @ ${modPriceCents}¢` });
+    },
+    onError: (err: any) => {
+      toast({ title: "Modify Failed", description: err?.message, variant: "destructive" });
+    },
+  });
+
+  const modifyAndApproveMutation = useMutation({
+    mutationFn: async () => {
+      await apiRequest("POST", `/api/pending-trades/${trade.id}/modify`, {
+        contracts: modContracts,
+        priceCents: modPriceCents,
+      });
+      const res = await apiRequest("POST", `/api/pending-trades/${trade.id}/approve`, {});
+      return res.json();
+    },
+    onSuccess: (data: any) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/pending-trades"] });
+      setShowModify(false);
+      toast({ title: "Modified & Submitted", description: data?.orderId ? `Order: ${data.orderId}` : "Trade queued." });
+    },
+    onError: (err: any) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/pending-trades"] });
+      toast({ title: "Failed", description: err?.message, variant: "destructive" });
+    },
+  });
+
+  const isPending = approveMutation.isPending || rejectMutation.isPending || modifyMutation.isPending || modifyAndApproveMutation.isPending;
 
   return (
-    <Card className={`transition-all ${executed ? "ring-1 ring-profit/40 bg-profit/5" : ""}`} data-testid={`hitl-card-${sig.id}`}>
+    <Card
+      className="transition-all border-border/60 hover:border-border"
+      data-testid={`hitl-card-${trade.id}`}
+    >
       <CardContent className="p-5 space-y-4">
-        {/* Header */}
+        {/* Header row */}
         <div className="flex items-start justify-between gap-3">
-          <div className="space-y-1 flex-1">
-            <div className="flex items-center gap-2 flex-wrap">
-              <h3 className="text-base font-semibold">{event.name}</h3>
-              <Badge variant="outline" className={`text-[10px] px-1.5 border ${edgeType.color}`}>{edgeType.label}</Badge>
-              <Badge variant={isYes ? "outline" : "outline"} className={`text-xs ${isYes ? "border-profit text-profit" : "border-loss text-loss"}`}>
-                {isYes ? "BUY YES" : "BUY NO"}
-              </Badge>
+          <div className="flex items-start gap-3 flex-1 min-w-0">
+            <div className={`flex items-center justify-center w-9 h-9 rounded-lg shrink-0 ${isYes ? "bg-profit/10" : "bg-loss/10"}`}>
+              {isYes ? (
+                <TrendingUp className="w-4.5 h-4.5 text-profit" />
+              ) : (
+                <TrendingDown className="w-4.5 h-4.5 text-loss" />
+              )}
             </div>
-            <p className="text-xs text-muted-foreground">{event.description}</p>
+            <div className="space-y-1 min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <h3 className="text-sm font-semibold leading-tight truncate max-w-xs">{trade.title || trade.ticker}</h3>
+                <Badge
+                  variant="outline"
+                  className={`text-[10px] px-1.5 border shrink-0 ${isYes ? "border-profit/40 text-profit" : "border-loss/40 text-loss"}`}
+                >
+                  {isYes ? "BUY YES" : "BUY NO"}
+                </Badge>
+              </div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <Badge variant="outline" className={`text-[10px] px-1.5 border ${edgeSourceInfo.color}`}>
+                  <EdgeIcon className="w-2.5 h-2.5 mr-1" />
+                  {edgeSourceInfo.label}
+                </Badge>
+                <span className="text-[10px] text-muted-foreground mono">{trade.ticker}</span>
+                <span className="flex items-center gap-1 text-[10px] text-muted-foreground">
+                  <Clock className="w-2.5 h-2.5" />
+                  {timeAgo(trade.createdAt)}
+                </span>
+              </div>
+            </div>
           </div>
-          <div className="text-right flex-shrink-0">
-            <div className={`text-xl font-bold mono ${isYes ? "text-profit" : "text-loss"}`}>
-              {sig.edgeScore > 0 ? "+" : ""}{sig.edgeScore.toFixed(1)}%
+          <div className="text-right shrink-0">
+            <div className={`text-lg font-bold mono ${isYes ? "text-profit" : "text-loss"}`}>
+              {trade.edgeScore > 0 ? "+" : ""}{trade.edgeScore.toFixed(1)}%
             </div>
-            <div className="text-[10px] text-muted-foreground uppercase tracking-wide">Edge</div>
+            <div className="text-[9px] text-muted-foreground uppercase tracking-wide">Edge</div>
           </div>
         </div>
 
-        {/* Key Metrics */}
+        {/* Metrics row */}
         <div className="grid grid-cols-4 gap-2">
           <div className="bg-muted/30 rounded-md p-2 text-center">
-            <div className="text-[10px] text-muted-foreground uppercase tracking-wide">Model Prob</div>
-            <div className="mono text-sm font-semibold">{(sig.trueProbability * 100).toFixed(1)}%</div>
+            <div className="text-[9px] text-muted-foreground uppercase tracking-wide mb-0.5">True Prob</div>
+            <div className="mono text-xs font-semibold">{(trade.trueProbability * 100).toFixed(1)}%</div>
           </div>
           <div className="bg-muted/30 rounded-md p-2 text-center">
-            <div className="text-[10px] text-muted-foreground uppercase tracking-wide">Market</div>
-            <div className="mono text-sm">{priceCents}¢</div>
+            <div className="text-[9px] text-muted-foreground uppercase tracking-wide mb-0.5">Market</div>
+            <div className="mono text-xs">{trade.priceCents}¢</div>
           </div>
           <div className="bg-muted/30 rounded-md p-2 text-center">
-            <div className="text-[10px] text-muted-foreground uppercase tracking-wide">Confidence</div>
-            <div className={`mono text-sm font-semibold ${sig.modelConfidence >= 0.8 ? "text-profit" : ""}`}>
-              {(sig.modelConfidence * 100).toFixed(0)}%
+            <div className="text-[9px] text-muted-foreground uppercase tracking-wide mb-0.5">Confidence</div>
+            <div className={`mono text-xs font-semibold ${trade.modelConfidence >= 0.8 ? "text-profit" : ""}`}>
+              {(trade.modelConfidence * 100).toFixed(0)}%
             </div>
           </div>
           <div className="bg-muted/30 rounded-md p-2 text-center">
-            <div className="text-[10px] text-muted-foreground uppercase tracking-wide">Model</div>
-            <div className="text-xs truncate">{sig.modelName}</div>
+            <div className="text-[9px] text-muted-foreground uppercase tracking-wide mb-0.5">Model</div>
+            <div className="text-[10px] truncate" title={trade.modelName}>{trade.modelName.split("-")[0]}</div>
           </div>
         </div>
 
         {/* Reasoning */}
         <div className="bg-muted/20 rounded-lg p-3 border border-border/50">
-          <div className="flex items-center gap-1.5 text-xs font-medium text-primary mb-1.5">
-            <Target className="w-3.5 h-3.5" />
+          <div className="flex items-center gap-1.5 text-[10px] font-medium text-primary mb-1.5">
+            <Target className="w-3 h-3" />
             Why this trade
           </div>
-          <p className="text-xs text-foreground/80 leading-relaxed">{reasoning}</p>
+          <p className="text-xs text-foreground/80 leading-relaxed">{trade.reasoning}</p>
         </div>
 
-        {/* Trade Controls */}
-        {executed ? (
-          <div className="flex items-center gap-2 bg-profit/10 border border-profit/20 rounded-lg p-3">
-            <CheckCircle2 className="w-5 h-5 text-profit" />
+        {/* Cost summary */}
+        <div className="flex items-center justify-between text-xs bg-muted/30 rounded-md px-3 py-2">
+          <div className="flex items-center gap-4">
             <div>
-              <div className="text-sm font-medium text-profit">Order Placed</div>
-              <div className="text-xs text-muted-foreground">{contracts} contracts {side.toUpperCase()} at {priceCents}¢ — ${estimatedCost}</div>
+              <span className="text-muted-foreground">Contracts: </span>
+              <span className="mono font-semibold">{trade.contracts}</span>
+            </div>
+            <div>
+              <span className="text-muted-foreground">Cost: </span>
+              <span className="mono font-semibold">${trade.estimatedCost.toFixed(2)}</span>
+            </div>
+            <div>
+              <span className="text-muted-foreground">Max Profit: </span>
+              <span className="mono font-semibold text-profit">${trade.maxProfit.toFixed(2)}</span>
             </div>
           </div>
-        ) : (
-          <div className="space-y-3">
-            <div className="flex items-center gap-3">
-              <div className="flex-1 space-y-1.5">
-                <div className="flex items-center justify-between text-xs">
-                  <span className="text-muted-foreground">Contracts</span>
-                  <span className="mono font-medium">{contracts}</span>
-                </div>
-                <Slider
-                  data-testid={`slider-contracts-${sig.id}`}
-                  value={[contracts]}
-                  onValueChange={v => setContracts(v[0])}
-                  min={1}
-                  max={100}
-                  step={1}
-                  className="w-full"
-                />
+        </div>
+
+        {/* Modify panel */}
+        {showModify && (
+          <div className="border border-blue-500/20 bg-blue-500/5 rounded-lg p-4 space-y-3">
+            <div className="text-xs font-medium text-blue-400">Modify Trade Parameters</div>
+            <div className="space-y-2">
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-muted-foreground">Contracts</span>
+                <span className="mono font-medium">{modContracts}</span>
               </div>
-              <div className="w-20">
+              <div className="flex items-center gap-2">
+                <Slider
+                  data-testid={`slider-modify-contracts-${trade.id}`}
+                  value={[modContracts]}
+                  onValueChange={([v]) => setModContracts(v)}
+                  min={1}
+                  max={500}
+                  step={1}
+                  className="flex-1"
+                />
                 <Input
-                  data-testid={`input-contracts-${sig.id}`}
                   type="number"
                   min={1}
-                  max={1000}
-                  value={contracts}
-                  onChange={e => setContracts(Math.max(1, parseInt(e.target.value) || 1))}
-                  className="h-8 text-sm mono text-center"
+                  max={500}
+                  value={modContracts}
+                  onChange={e => setModContracts(Math.max(1, parseInt(e.target.value) || 1))}
+                  className="h-7 w-16 text-xs mono text-center"
                 />
               </div>
             </div>
-
-            {/* Cost Summary */}
-            <div className="flex items-center justify-between text-xs bg-muted/30 rounded-md px-3 py-2">
-              <div className="flex items-center gap-4">
-                <div>
-                  <span className="text-muted-foreground">Cost: </span>
-                  <span className="mono font-semibold">${estimatedCost}</span>
-                </div>
-                <div>
-                  <span className="text-muted-foreground">Max Profit: </span>
-                  <span className="mono font-semibold text-profit">${potentialProfit}</span>
-                </div>
-                <div>
-                  <span className="text-muted-foreground">Return: </span>
-                  <span className="mono font-semibold text-profit">
-                    {((parseFloat(potentialProfit) / parseFloat(estimatedCost)) * 100).toFixed(0)}%
-                  </span>
-                </div>
+            <div className="space-y-2">
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-muted-foreground">Price (cents)</span>
+                <span className="mono font-medium">{modPriceCents}¢</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <Slider
+                  data-testid={`slider-modify-price-${trade.id}`}
+                  value={[modPriceCents]}
+                  onValueChange={([v]) => setModPriceCents(v)}
+                  min={1}
+                  max={99}
+                  step={1}
+                  className="flex-1"
+                />
+                <Input
+                  type="number"
+                  min={1}
+                  max={99}
+                  value={modPriceCents}
+                  onChange={e => setModPriceCents(Math.max(1, Math.min(99, parseInt(e.target.value) || 1)))}
+                  className="h-7 w-16 text-xs mono text-center"
+                />
               </div>
             </div>
+            <div className="text-xs text-muted-foreground bg-muted/30 rounded px-2 py-1.5">
+              Updated: <span className="mono font-medium">{modContracts} contracts × {modPriceCents}¢</span>
+              {" = "}
+              <span className="mono font-semibold">${modCost}</span>
+              {" · Max profit: "}
+              <span className="mono font-semibold text-profit">${modProfit}</span>
+            </div>
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                className="flex-1 text-xs border-blue-500/30 text-blue-400"
+                onClick={() => modifyMutation.mutate()}
+                disabled={isPending}
+                data-testid={`button-save-modify-${trade.id}`}
+              >
+                Save (keep pending)
+              </Button>
+              <Button
+                size="sm"
+                className="flex-1 text-xs bg-profit hover:bg-profit/90 text-black"
+                onClick={() => modifyAndApproveMutation.mutate()}
+                disabled={isPending || !hasPrivateKey}
+                data-testid={`button-modify-approve-${trade.id}`}
+              >
+                <Zap className="w-3 h-3 mr-1" />
+                Save & Approve
+              </Button>
+            </div>
+          </div>
+        )}
 
-            {/* Execute Button */}
-            <Button
-              data-testid={`button-execute-${sig.id}`}
-              className={`w-full h-10 font-semibold ${isYes ? "bg-profit hover:bg-profit/90 text-profit-foreground" : "bg-loss hover:bg-loss/90 text-white"}`}
-              onClick={() => setShowConfirm(true)}
-              disabled={placeTrade.isPending || !hasPrivateKey}
-            >
-              {placeTrade.isPending ? (
-                "Placing Order..."
-              ) : !hasPrivateKey ? (
-                <>
-                  <AlertTriangle className="w-4 h-4 mr-2" />
-                  Configure API Key in Settings to Trade
-                </>
-              ) : (
-                <>
-                  <Zap className="w-4 h-4 mr-2" />
-                  Execute: {isYes ? "BUY YES" : "BUY NO"} — {contracts} contracts @ {priceCents}¢
-                </>
-              )}
-            </Button>
+        {/* Action buttons */}
+        <div className="grid grid-cols-3 gap-2">
+          <Button
+            data-testid={`button-approve-${trade.id}`}
+            className="h-9 text-xs font-semibold bg-profit hover:bg-profit/90 text-black"
+            onClick={() => setShowConfirm(true)}
+            disabled={isPending}
+          >
+            <CheckCircle2 className="w-3.5 h-3.5 mr-1.5" />
+            Approve
+          </Button>
+          <Button
+            data-testid={`button-modify-${trade.id}`}
+            variant="outline"
+            className="h-9 text-xs font-semibold border-blue-500/40 text-blue-400 hover:bg-blue-500/10"
+            onClick={() => setShowModify(v => !v)}
+            disabled={isPending}
+          >
+            <Edit3 className="w-3.5 h-3.5 mr-1.5" />
+            {showModify ? "Cancel" : "Modify"}
+          </Button>
+          <Button
+            data-testid={`button-reject-${trade.id}`}
+            variant="outline"
+            className="h-9 text-xs font-semibold border-loss/40 text-loss hover:bg-loss/10"
+            onClick={() => rejectMutation.mutate()}
+            disabled={isPending}
+          >
+            <X className="w-3.5 h-3.5 mr-1.5" />
+            Reject
+          </Button>
+        </div>
+
+        {!hasPrivateKey && (
+          <div className="flex items-center gap-1.5 text-[10px] text-amber-400">
+            <AlertTriangle className="w-3 h-3" />
+            No API key — approval will fail. Configure in Settings.
           </div>
         )}
       </CardContent>
 
-      {/* Confirmation Dialog */}
+      {/* Confirmation dialog */}
       <AlertDialog open={showConfirm} onOpenChange={setShowConfirm}>
-        <AlertDialogContent className="bg-card border-border">
+        <AlertDialogContent className="bg-card border-border max-w-sm">
           <AlertDialogHeader>
-            <AlertDialogTitle>Confirm Trade</AlertDialogTitle>
+            <AlertDialogTitle className="text-sm">
+              Confirm Trade: {isYes ? "BUY YES" : "BUY NO"} — {trade.ticker}
+            </AlertDialogTitle>
             <AlertDialogDescription asChild>
               <div className="space-y-3">
-                <p>You are about to place a real order on Kalshi:</p>
-                <div className="bg-muted/30 rounded-md p-3 space-y-1 text-sm">
-                  <div><span className="text-muted-foreground">Event:</span> <span className="font-medium">{event.name}</span></div>
-                  <div><span className="text-muted-foreground">Action:</span> <span className={`font-medium ${isYes ? "text-profit" : "text-loss"}`}>{isYes ? "BUY YES" : "BUY NO"}</span></div>
-                  <div><span className="text-muted-foreground">Contracts:</span> <span className="mono font-medium">{contracts}</span></div>
-                  <div><span className="text-muted-foreground">Price:</span> <span className="mono font-medium">{priceCents}¢ per contract</span></div>
-                  <div><span className="text-muted-foreground">Total Cost:</span> <span className="mono font-semibold">${estimatedCost}</span></div>
-                  <div><span className="text-muted-foreground">Max Profit:</span> <span className="mono font-semibold text-profit">${potentialProfit}</span></div>
-                  <div><span className="text-muted-foreground">Order Type:</span> <span className="font-medium">Limit (Post-Only)</span></div>
+                <div className="bg-muted/30 rounded-md p-3 space-y-1.5 text-xs">
+                  <div><span className="text-muted-foreground">Event: </span><span className="font-medium">{trade.title || trade.ticker}</span></div>
+                  <div><span className="text-muted-foreground">Action: </span>
+                    <span className={`font-medium ${isYes ? "text-profit" : "text-loss"}`}>{isYes ? "BUY YES" : "BUY NO"}</span>
+                  </div>
+                  <div><span className="text-muted-foreground">Contracts: </span><span className="mono font-medium">{trade.contracts}</span></div>
+                  <div><span className="text-muted-foreground">Price: </span><span className="mono font-medium">{trade.priceCents}¢</span></div>
+                  <div><span className="text-muted-foreground">Cost: </span><span className="mono font-semibold">${trade.estimatedCost.toFixed(2)}</span></div>
+                  <div><span className="text-muted-foreground">Max Profit: </span><span className="mono font-semibold text-profit">${trade.maxProfit.toFixed(2)}</span></div>
+                  <div><span className="text-muted-foreground">Edge: </span><span className="mono font-semibold">{trade.edgeScore.toFixed(1)}%</span></div>
+                  <div><span className="text-muted-foreground">Confidence: </span><span className="mono font-semibold">{(trade.modelConfidence * 100).toFixed(0)}%</span></div>
+                  <div><span className="text-muted-foreground">Order Type: </span><span className="font-medium">Limit (Post-Only)</span></div>
                 </div>
-                <p className="text-xs text-muted-foreground">This will place a real order using your Kalshi API credentials. Post-only orders qualify for the 0.05% maker rebate.</p>
+                <p className="text-[10px] text-muted-foreground">
+                  This will place a real limit order (post-only) on Kalshi using your RSA credentials. Post-only orders qualify for the 0.05% maker rebate.
+                </p>
               </div>
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel data-testid="button-cancel-confirm">Cancel</AlertDialogCancel>
+            <AlertDialogCancel data-testid="button-cancel-confirm" className="text-xs">Cancel</AlertDialogCancel>
             <AlertDialogAction
               data-testid="button-confirm-trade"
-              className={isYes ? "bg-profit hover:bg-profit/90" : "bg-loss hover:bg-loss/90"}
-              onClick={handleConfirmTrade}
+              className={`text-xs ${isYes ? "bg-profit hover:bg-profit/90 text-black" : "bg-loss hover:bg-loss/90 text-white"}`}
+              onClick={() => {
+                setShowConfirm(false);
+                approveMutation.mutate();
+              }}
             >
-              Confirm & Place Order
+              <Zap className="w-3 h-3 mr-1.5" />
+              Confirm & Execute
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -305,39 +452,82 @@ function TradeCard({ sig, hasPrivateKey }: { sig: Signal; hasPrivateKey: boolean
   );
 }
 
+// ── Decided Trade Row ─────────────────────────────────────────────────────────
+
+function DecidedTradeRow({ trade }: { trade: PendingTrade }) {
+  const isYes = trade.side === "yes";
+  const edgeSourceInfo = getEdgeSourceInfo(trade.edgeSource);
+
+  return (
+    <div
+      className="flex items-center gap-3 p-3 rounded-lg border border-border/40 hover:border-border/60 transition-colors text-xs"
+      data-testid={`decided-row-${trade.id}`}
+    >
+      <div className={`flex items-center justify-center w-7 h-7 rounded shrink-0 ${
+        trade.status === "executed" ? "bg-profit/10" :
+        trade.status === "rejected" ? "bg-loss/10" :
+        trade.status === "failed" ? "bg-red-500/10" : "bg-muted/30"
+      }`}>
+        {trade.status === "executed" ? <CheckCircle2 className="w-3.5 h-3.5 text-profit" /> :
+         trade.status === "rejected" ? <X className="w-3.5 h-3.5 text-loss" /> :
+         trade.status === "failed" ? <AlertTriangle className="w-3.5 h-3.5 text-red-400" /> :
+         <Clock className="w-3.5 h-3.5 text-muted-foreground" />}
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="font-medium truncate">{trade.title || trade.ticker}</span>
+          {getStatusBadge(trade.status)}
+        </div>
+        <div className="flex items-center gap-3 text-muted-foreground mt-0.5">
+          <span>{isYes ? "BUY YES" : "BUY NO"} · {trade.contracts} contracts @ {trade.priceCents}¢</span>
+          {trade.orderId && <span className="mono text-[10px]">#{trade.orderId.slice(0, 8)}</span>}
+          {trade.errorMessage && <span className="text-red-400 truncate max-w-xs">{trade.errorMessage}</span>}
+        </div>
+      </div>
+      <div className="text-right shrink-0">
+        <div className={`mono font-semibold ${isYes ? "text-profit" : "text-loss"}`}>
+          {trade.edgeScore > 0 ? "+" : ""}{trade.edgeScore.toFixed(1)}%
+        </div>
+        <div className="text-muted-foreground text-[10px]">
+          {trade.decidedAt || trade.executedAt ? timeAgo(trade.decidedAt || trade.executedAt || trade.createdAt) : timeAgo(trade.createdAt)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main Page ─────────────────────────────────────────────────────────────────
 
 export default function HumanInTheLoop() {
-  const { data: signals, isLoading } = useQuery<Signal[]>({
-    queryKey: ["/api/signals"],
-    refetchInterval: 15000,
+  const [recentOpen, setRecentOpen] = useState(false);
+
+  const { data: trades = [], isLoading } = useQuery<PendingTrade[]>({
+    queryKey: ["/api/pending-trades"],
+    refetchInterval: 5000,
   });
 
-  const { data: settingsData } = useQuery<Settings>({
+  const { data: settingsData } = useQuery<SettingsData>({
     queryKey: ["/api/settings"],
   });
 
   const hasPrivateKey = settingsData?.hasPrivateKey ?? false;
 
-  // Filter to high-confidence actionable signals only
-  const topSignals = (signals || [])
-    .filter(s => s.signalType !== "NO_TRADE" && Math.abs(s.edgeScore) >= 4 && s.modelConfidence >= 0.65)
-    .sort((a, b) => {
-      // Sort by confidence × edge magnitude
-      const scoreA = a.modelConfidence * Math.abs(a.edgeScore);
-      const scoreB = b.modelConfidence * Math.abs(b.edgeScore);
-      return scoreB - scoreA;
-    })
-    .slice(0, 10);
+  const pendingTrades = trades.filter(t => t.status === "pending" || t.status === "modified");
+  const decidedTrades = trades.filter(t => !["pending", "modified"].includes(t.status));
 
-  const buyYesCount = topSignals.filter(s => s.signalType === "BUY_YES").length;
-  const buyNoCount = topSignals.filter(s => s.signalType === "BUY_NO").length;
-  const avgConfidence = topSignals.length > 0
-    ? (topSignals.reduce((sum, s) => sum + s.modelConfidence, 0) / topSignals.length * 100).toFixed(0)
-    : "0";
-  const avgEdge = topSignals.length > 0
-    ? (topSignals.reduce((sum, s) => sum + Math.abs(s.edgeScore), 0) / topSignals.length).toFixed(1)
-    : "0";
+  // Stats
+  const today = new Date().toISOString().slice(0, 10);
+  const approvedToday = decidedTrades.filter(t =>
+    (t.status === "executed" || t.status === "approved") &&
+    (t.decidedAt || t.executedAt || "").startsWith(today)
+  ).length;
+  const rejectedToday = decidedTrades.filter(t =>
+    t.status === "rejected" &&
+    (t.decidedAt || "").startsWith(today)
+  ).length;
+  const executedValue = decidedTrades
+    .filter(t => t.status === "executed")
+    .reduce((sum, t) => sum + t.estimatedCost, 0);
 
   return (
     <div className="p-4 space-y-4">
@@ -348,74 +538,118 @@ export default function HumanInTheLoop() {
         </div>
         <div>
           <h1 className="text-lg font-semibold">Human in the Loop</h1>
-          <p className="text-xs text-muted-foreground">Top predictions ranked by confidence and edge. Review, size, and execute.</p>
+          <p className="text-xs text-muted-foreground">
+            The bot finds trades. You approve them. Signals refresh every 60s.
+          </p>
         </div>
       </div>
 
-      {/* Summary KPIs */}
+      {/* Stats Row */}
       <div className="grid grid-cols-4 gap-3">
         <Card>
           <CardContent className="p-3 text-center">
-            <div className="text-2xl font-bold mono text-primary">{topSignals.length}</div>
-            <div className="text-[10px] text-muted-foreground uppercase tracking-wide">Actionable</div>
+            <div className="text-2xl font-bold mono text-amber-400">{pendingTrades.length}</div>
+            <div className="text-[10px] text-muted-foreground uppercase tracking-wide">Pending</div>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-3 text-center">
-            <div className="text-2xl font-bold mono">
-              <span className="text-profit">{buyYesCount}</span>
-              <span className="text-muted-foreground mx-1">/</span>
-              <span className="text-loss">{buyNoCount}</span>
-            </div>
-            <div className="text-[10px] text-muted-foreground uppercase tracking-wide">YES / NO</div>
+            <div className="text-2xl font-bold mono text-profit">{approvedToday}</div>
+            <div className="text-[10px] text-muted-foreground uppercase tracking-wide">Approved Today</div>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-3 text-center">
-            <div className="text-2xl font-bold mono">{avgConfidence}%</div>
-            <div className="text-[10px] text-muted-foreground uppercase tracking-wide">Avg Confidence</div>
+            <div className="text-2xl font-bold mono text-loss">{rejectedToday}</div>
+            <div className="text-[10px] text-muted-foreground uppercase tracking-wide">Rejected Today</div>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-3 text-center">
-            <div className="text-2xl font-bold mono">{avgEdge}%</div>
-            <div className="text-[10px] text-muted-foreground uppercase tracking-wide">Avg Edge</div>
+            <div className="text-2xl font-bold mono text-blue-400">${executedValue.toFixed(0)}</div>
+            <div className="text-[10px] text-muted-foreground uppercase tracking-wide">Executed Value</div>
           </CardContent>
         </Card>
       </div>
 
-      {/* Connection Warning */}
+      {/* API Key warning */}
       {!hasPrivateKey && (
-        <div className="flex items-center gap-2 bg-yellow-500/10 border border-yellow-500/20 rounded-lg p-3 text-xs text-yellow-400">
-          <AlertTriangle className="w-4 h-4 flex-shrink-0" />
-          <span>Configure your RSA private key in <a href="#/settings" className="underline font-medium">Settings</a> to execute trades. You can review predictions without it.</span>
+        <div className="flex items-center gap-2 bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 text-xs text-amber-400">
+          <AlertTriangle className="w-4 h-4 shrink-0" />
+          <span>
+            Configure your RSA private key in{" "}
+            <a href="#/settings" className="underline font-medium">Settings</a>{" "}
+            to execute trades. You can review and queue signals without it.
+          </span>
         </div>
       )}
 
-      {/* Trade Cards */}
-      {isLoading ? (
-        <div className="space-y-3">
-          {Array(4).fill(0).map((_, i) => <Skeleton key={i} className="h-64 rounded-lg" />)}
+      {/* Pending Trades Section */}
+      <div className="space-y-1">
+        <div className="flex items-center justify-between px-1">
+          <h2 className="text-sm font-medium text-foreground">
+            Pending Approval
+            {pendingTrades.length > 0 && (
+              <span className="ml-2 inline-flex items-center justify-center w-5 h-5 rounded-full bg-amber-500/20 text-amber-400 text-[10px] font-bold">
+                {pendingTrades.length}
+              </span>
+            )}
+          </h2>
+          <span className="text-[10px] text-muted-foreground">Bot scans every 60s</span>
         </div>
-      ) : topSignals.length === 0 ? (
-        <Card>
-          <CardContent className="p-10 text-center text-muted-foreground">
-            <Shield className="w-8 h-8 mx-auto mb-3 opacity-40" />
-            <div className="text-sm font-medium mb-1">No high-confidence signals right now</div>
-            <div className="text-xs">Signals require at least 4% edge and 65% model confidence to appear here. Check back soon.</div>
-          </CardContent>
-        </Card>
-      ) : (
-        <div className="space-y-3">
-          {topSignals.map((sig, idx) => (
-            <TradeCard key={sig.id} sig={sig} hasPrivateKey={hasPrivateKey} />
-          ))}
-        </div>
+
+        {isLoading ? (
+          <div className="space-y-3">
+            {Array(3).fill(0).map((_, i) => <Skeleton key={i} className="h-64 rounded-lg" />)}
+          </div>
+        ) : pendingTrades.length === 0 ? (
+          <Card>
+            <CardContent className="p-10 text-center text-muted-foreground">
+              <Shield className="w-8 h-8 mx-auto mb-3 opacity-30" />
+              <div className="text-sm font-medium mb-1">No pending trades</div>
+              <div className="text-xs max-w-xs mx-auto">
+                The bot scans live Kalshi markets every 60 seconds and will surface opportunities here when edge exceeds your thresholds.
+              </div>
+            </CardContent>
+          </Card>
+        ) : (
+          <div className="space-y-3">
+            {pendingTrades.map(trade => (
+              <PendingTradeCard key={trade.id} trade={trade} hasPrivateKey={hasPrivateKey} />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Recent Activity */}
+      {decidedTrades.length > 0 && (
+        <Collapsible open={recentOpen} onOpenChange={setRecentOpen}>
+          <CollapsibleTrigger asChild>
+            <Button
+              variant="ghost"
+              className="w-full flex items-center justify-between h-9 px-3 text-xs text-muted-foreground hover:text-foreground border border-border/40 rounded-lg"
+              data-testid="button-recent-activity"
+            >
+              <span className="flex items-center gap-2">
+                <Activity className="w-3.5 h-3.5" />
+                Recent Activity ({decidedTrades.length})
+              </span>
+              <ChevronDown className={`w-3.5 h-3.5 transition-transform ${recentOpen ? "rotate-180" : ""}`} />
+            </Button>
+          </CollapsibleTrigger>
+          <CollapsibleContent>
+            <div className="space-y-2 mt-2">
+              {decidedTrades.slice(0, 20).map(trade => (
+                <DecidedTradeRow key={trade.id} trade={trade} />
+              ))}
+            </div>
+          </CollapsibleContent>
+        </Collapsible>
       )}
 
-      {/* Footer Disclaimer */}
+      {/* Footer */}
       <div className="text-[10px] text-muted-foreground/50 text-center pt-2">
-        Predictions are model-generated estimates. Trading on Kalshi involves risk of loss. Past performance does not guarantee future results. CFTC-regulated.
+        Signals are model-generated estimates. Trading on Kalshi involves risk of loss. CFTC-regulated.
       </div>
     </div>
   );

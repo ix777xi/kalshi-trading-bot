@@ -6,6 +6,8 @@ import {
   positions, orders, signals, agents, portfolio, pnlHistory,
   riskConfig, auditLog, backtestResults, equityCurve, settings,
 } from "@shared/schema";
+import { generateLiveSignals } from "./signal-engine";
+import { randomUUID } from "crypto";
 
 const KALSHI_BASE = "https://api.elections.kalshi.com/trade-api/v2";
 
@@ -436,6 +438,15 @@ export async function registerRoutes(
   });
 
   app.get("/api/signals", async (_req, res) => {
+    // Try live signals first, fall back to DB
+    try {
+      const liveSignals = await generateLiveSignals();
+      if (liveSignals.length > 0) {
+        return res.json(liveSignals.map((s, idx) => ({ ...s, id: idx + 1 })));
+      }
+    } catch (e) {
+      console.error("[/api/signals] Live engine error, falling back to DB:", e);
+    }
     res.json(await storage.getSignals());
   });
 
@@ -590,6 +601,276 @@ export async function registerRoutes(
     res.status(result.status).json(result.data);
   });
 
+  // ── Pending Trades API ───────────────────────────────────────────────────
+  app.get("/api/pending-trades", async (req, res) => {
+    try {
+      const status = req.query.status as string | undefined;
+      const trades = await storage.getPendingTrades(status);
+      res.json(trades);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/pending-trades/:id/approve", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const trade = await storage.getPendingTradeById(id);
+      if (!trade) return res.status(404).json({ error: "Trade not found" });
+      if (trade.status !== "pending" && trade.status !== "modified") {
+        return res.status(400).json({ error: "Trade is not in pending/modified state" });
+      }
+
+      const now = new Date().toISOString();
+      await storage.updatePendingTradeStatus(id, "approved", { decidedAt: now });
+
+      // Try to execute via Kalshi API
+      const creds = await getKalshiCredentials();
+      if (!creds) {
+        await storage.updatePendingTradeStatus(id, "failed", { errorMessage: "Configure API key first" });
+        return res.status(400).json({ error: "Configure your RSA private key in Settings to execute trades" });
+      }
+
+      const isYes = trade.side === "yes";
+      const orderBody: any = {
+        ticker: trade.ticker,
+        side: trade.side,
+        action: "buy",
+        count: trade.contracts,
+        type: "limit",
+        client_order_id: randomUUID(),
+        post_only: true,
+      };
+      if (isYes) {
+        orderBody.yes_price = trade.priceCents;
+      } else {
+        orderBody.no_price = 100 - trade.priceCents;
+      }
+
+      const result = await kalshiAuthFetch("POST", "/portfolio/orders", orderBody);
+      if (result.ok) {
+        const orderId = (result.data as any)?.order?.order_id || (result.data as any)?.order_id || "unknown";
+        await storage.updatePendingTradeStatus(id, "executed", {
+          orderId,
+          executedAt: new Date().toISOString(),
+        });
+        res.json({ success: true, orderId, trade: await storage.getPendingTradeById(id) });
+      } else {
+        const errMsg = (result.data as any)?.detail || (result.data as any)?.error || JSON.stringify(result.data);
+        await storage.updatePendingTradeStatus(id, "failed", { errorMessage: errMsg });
+        res.status(result.status).json({ error: errMsg, trade: await storage.getPendingTradeById(id) });
+      }
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/pending-trades/:id/reject", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const trade = await storage.getPendingTradeById(id);
+      if (!trade) return res.status(404).json({ error: "Trade not found" });
+      const now = new Date().toISOString();
+      const updated = await storage.updatePendingTradeStatus(id, "rejected", { decidedAt: now });
+      res.json(updated);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/pending-trades/:id/modify", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const trade = await storage.getPendingTradeById(id);
+      if (!trade) return res.status(404).json({ error: "Trade not found" });
+
+      const { contracts, priceCents } = req.body;
+      await storage.updatePendingTrade(id, {
+        contracts: contracts !== undefined ? parseInt(contracts) : undefined,
+        priceCents: priceCents !== undefined ? parseInt(priceCents) : undefined,
+      });
+      const updated = await storage.updatePendingTradeStatus(id, "modified");
+      res.json(updated);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ── Live Signals (from signal engine) ────────────────────────────────────
+  // Cache for live signals
+  let signalCache: { data: any[]; ts: number } | null = null;
+  const SIGNAL_CACHE_TTL = 60_000;
+
+  async function getCachedSignals() {
+    const now = Date.now();
+    if (signalCache && now - signalCache.ts < SIGNAL_CACHE_TTL) {
+      return signalCache.data;
+    }
+    try {
+      const liveSignals = await generateLiveSignals();
+      signalCache = { data: liveSignals, ts: now };
+      return liveSignals;
+    } catch (e) {
+      console.error("[Signal Engine] Failed:", e);
+      return signalCache?.data || [];
+    }
+  }
+
+  // Override the existing /api/signals endpoint with live data
+  app.get("/api/signals/live", async (_req, res) => {
+    try {
+      const liveSignals = await getCachedSignals();
+      res.json({
+        signals: liveSignals,
+        count: liveSignals.length,
+        cachedAt: signalCache?.ts ? new Date(signalCache.ts).toISOString() : null,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ── Bot Config ────────────────────────────────────────────────────────────
+  app.get("/api/bot/config", async (_req, res) => {
+    const s = await storage.getSettings();
+    if (!s) return res.json({ botMode: "hitl", autoMinEdge: 5, autoMinConfidence: 75, autoMaxContracts: 50, autoMaxCost: 50 });
+    res.json({
+      botMode: (s as any).botMode || "hitl",
+      autoMinEdge: (s as any).autoMinEdge ?? 5,
+      autoMinConfidence: (s as any).autoMinConfidence ?? 75,
+      autoMaxContracts: (s as any).autoMaxContracts ?? 50,
+      autoMaxCost: (s as any).autoMaxCost ?? 50,
+    });
+  });
+
+  app.put("/api/bot/config", async (req, res) => {
+    try {
+      const { botMode, autoMinEdge, autoMinConfidence, autoMaxContracts, autoMaxCost } = req.body;
+      const update: any = {};
+      if (botMode !== undefined) update.botMode = botMode;
+      if (autoMinEdge !== undefined) update.autoMinEdge = parseFloat(autoMinEdge);
+      if (autoMinConfidence !== undefined) update.autoMinConfidence = parseFloat(autoMinConfidence);
+      if (autoMaxContracts !== undefined) update.autoMaxContracts = parseInt(autoMaxContracts);
+      if (autoMaxCost !== undefined) update.autoMaxCost = parseFloat(autoMaxCost);
+      await storage.updateSettings(update);
+      res.json({ success: true, ...update });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ── Background Signal Scanner ─────────────────────────────────────────────
+  setInterval(async () => {
+    try {
+      console.log("[Auto-Scanner] Running signal scan...");
+      const signals = await getCachedSignals();
+      const settingsData = await storage.getSettings();
+      const minEdge = (settingsData as any)?.autoMinEdge ?? 5;
+      const minConf = (settingsData as any)?.autoMinConfidence ?? 75;
+      const maxContracts = (settingsData as any)?.autoMaxContracts ?? 50;
+      const maxCost = (settingsData as any)?.autoMaxCost ?? 50;
+
+      const existing = await storage.getPendingTrades("pending");
+      const existingTickers = new Set(existing.map((t: any) => t.ticker));
+
+      for (const sig of signals) {
+        if (existingTickers.has(sig.ticker)) continue;
+        if (Math.abs(sig.edgeScore) < minEdge) continue;
+        if (sig.modelConfidence * 100 < minConf) continue;
+        if (sig.signalType === "NO_TRADE") continue;
+
+        const side = sig.signalType === "BUY_YES" ? "yes" : "no";
+        const priceCents = Math.round(sig.marketPrice * 100);
+        const contracts = Math.min(maxContracts, Math.max(1, Math.floor(maxCost / sig.marketPrice)));
+        const estimatedCost = parseFloat((contracts * sig.marketPrice).toFixed(2));
+        const maxProfit = parseFloat((contracts * (1 - sig.marketPrice)).toFixed(2));
+
+        await storage.createPendingTrade({
+          ticker: sig.ticker,
+          title: sig.title,
+          side,
+          action: "buy",
+          contracts,
+          priceCents,
+          estimatedCost,
+          maxProfit,
+          edgeScore: sig.edgeScore,
+          trueProbability: sig.trueProbability,
+          marketPrice: sig.marketPrice,
+          modelConfidence: sig.modelConfidence,
+          modelName: sig.modelName,
+          edgeSource: sig.edgeSource,
+          reasoning: sig.reasoning,
+          status: "pending",
+          createdAt: new Date().toISOString(),
+          decidedAt: null,
+          executedAt: null,
+          orderId: null,
+          errorMessage: null,
+        });
+        console.log(`[Auto-Scanner] Queued trade: ${sig.ticker} (${side}) edge=${sig.edgeScore.toFixed(1)}%`);
+      }
+    } catch (e) {
+      console.error("[Auto-Scanner] Error:", e);
+    }
+  }, 60_000);
+
+  // Kick off initial scan after 5 seconds (so server is fully up)
+  setTimeout(async () => {
+    try {
+      console.log("[Auto-Scanner] Initial scan...");
+      const signals = await getCachedSignals();
+      const settingsData = await storage.getSettings();
+      const minEdge = (settingsData as any)?.autoMinEdge ?? 5;
+      const minConf = (settingsData as any)?.autoMinConfidence ?? 75;
+      const maxContracts = (settingsData as any)?.autoMaxContracts ?? 50;
+      const maxCost = (settingsData as any)?.autoMaxCost ?? 50;
+
+      const existing = await storage.getPendingTrades("pending");
+      const existingTickers = new Set(existing.map((t: any) => t.ticker));
+
+      for (const sig of signals) {
+        if (existingTickers.has(sig.ticker)) continue;
+        if (Math.abs(sig.edgeScore) < minEdge) continue;
+        if (sig.modelConfidence * 100 < minConf) continue;
+        if (sig.signalType === "NO_TRADE") continue;
+
+        const side = sig.signalType === "BUY_YES" ? "yes" : "no";
+        const priceCents = Math.round(sig.marketPrice * 100);
+        const contracts = Math.min(maxContracts, Math.max(1, Math.floor(maxCost / sig.marketPrice)));
+        const estimatedCost = parseFloat((contracts * sig.marketPrice).toFixed(2));
+        const maxProfit = parseFloat((contracts * (1 - sig.marketPrice)).toFixed(2));
+
+        await storage.createPendingTrade({
+          ticker: sig.ticker,
+          title: sig.title,
+          side,
+          action: "buy",
+          contracts,
+          priceCents,
+          estimatedCost,
+          maxProfit,
+          edgeScore: sig.edgeScore,
+          trueProbability: sig.trueProbability,
+          marketPrice: sig.marketPrice,
+          modelConfidence: sig.modelConfidence,
+          modelName: sig.modelName,
+          edgeSource: sig.edgeSource,
+          reasoning: sig.reasoning,
+          status: "pending",
+          createdAt: new Date().toISOString(),
+          decidedAt: null,
+          executedAt: null,
+          orderId: null,
+          errorMessage: null,
+        });
+      }
+      console.log(`[Auto-Scanner] Initial scan complete: ${signals.length} signals processed`);
+    } catch (e) {
+      console.error("[Auto-Scanner] Initial scan error:", e);
+    }
+  }, 5_000);
+
   return httpServer;
 }
 
@@ -723,6 +1004,37 @@ function sqlite_migrate() {
     );
 
   `);
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS pending_trades (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ticker TEXT NOT NULL,
+      title TEXT NOT NULL,
+      side TEXT NOT NULL,
+      action TEXT NOT NULL DEFAULT 'buy',
+      contracts INTEGER NOT NULL,
+      price_cents INTEGER NOT NULL,
+      estimated_cost REAL NOT NULL,
+      max_profit REAL NOT NULL,
+      edge_score REAL NOT NULL,
+      true_probability REAL NOT NULL,
+      market_price REAL NOT NULL,
+      model_confidence REAL NOT NULL,
+      model_name TEXT NOT NULL,
+      edge_source TEXT NOT NULL,
+      reasoning TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at TEXT NOT NULL,
+      decided_at TEXT,
+      executed_at TEXT,
+      order_id TEXT,
+      error_message TEXT
+    );
+  `);
   // Add new columns for existing databases (ALTER TABLE IF NOT EXISTS not supported in SQLite)
   try { sqlite.exec("ALTER TABLE settings ADD COLUMN kalshi_private_key TEXT NOT NULL DEFAULT ''"); } catch {}
+  try { sqlite.exec("ALTER TABLE settings ADD COLUMN bot_mode TEXT NOT NULL DEFAULT 'hitl'"); } catch {}
+  try { sqlite.exec("ALTER TABLE settings ADD COLUMN auto_min_edge REAL NOT NULL DEFAULT 5"); } catch {}
+  try { sqlite.exec("ALTER TABLE settings ADD COLUMN auto_min_confidence REAL NOT NULL DEFAULT 75"); } catch {}
+  try { sqlite.exec("ALTER TABLE settings ADD COLUMN auto_max_contracts INTEGER NOT NULL DEFAULT 50"); } catch {}
+  try { sqlite.exec("ALTER TABLE settings ADD COLUMN auto_max_cost REAL NOT NULL DEFAULT 50"); } catch {}
 }

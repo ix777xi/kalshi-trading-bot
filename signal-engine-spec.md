@@ -1,0 +1,151 @@
+# Signal Engine + HITL Approval Workflow Spec
+
+## Overview
+Replace mock signals with a REAL signal engine that analyzes live Kalshi markets, then route signals through a Human-in-the-Loop approval workflow with Approve/Modify/Reject.
+
+## Part 1: Signal Engine (server/signal-engine.ts)
+
+Create a new file that generates signals from live data using 4 documented alpha edges:
+
+### Edge 1: Favorite-Longshot Bias
+- Scan all live markets
+- If YES price < 20¢: flag as "Longshot" — NO side has structural edge
+  - At 5¢: actual win rate ~4.18% vs 5% implied = -16.36% misprice
+  - At 1¢: YES EV = -41%, NO EV = +23%
+- If YES price > 80¢: flag as "Favorite" — slight YES outperformance
+- Model: "Longshot-Bias-Model", confidence 0.82-0.88
+
+### Edge 2: YES/NO Asymmetry
+- At prices 15-55¢: NO systematically outperforms YES
+- NO outperforms at 69/99 price levels
+- Dollar-weighted: YES = -1.02%, NO = +0.83%
+- Model: "YES-NO-Asymmetry", confidence volume-weighted
+
+### Edge 3: Weather Model vs Crowd
+- Fetch GFS 31-member ensemble from Open-Meteo (free, no API key):
+  - Ensemble: https://ensemble-api.open-meteo.com/v1/ensemble?latitude=40.7829&longitude=-73.9654&daily=temperature_2m_max&temperature_unit=fahrenheit&timezone=America/New_York&forecast_days=7&models=gfs_seamless
+  - Point forecast: https://api.open-meteo.com/v1/forecast?latitude=40.7829&longitude=-73.9654&daily=temperature_2m_max&temperature_unit=fahrenheit&timezone=America/New_York&forecast_days=7&models=gfs_seamless
+- Get KXHIGHNY markets from Kalshi
+- For each bracket: compute GFS probability (what % of 31 members fall in that bracket)
+- Compare to market price → flag when edge > 3%
+- Model: "GFS-31-Ensemble", confidence based on days until resolution
+
+### Edge 4: Market Structure (Spread Analysis)
+- Wide spread + high OI = market maker opportunity
+- Makers earn +1.12% avg excess return
+- Model: "Spread-Structure"
+
+### Signal Engine API
+- `generateLiveSignals()` returns LiveSignal[] sorted by |edge| × confidence
+- Cache results for 60 seconds
+- Endpoint: GET /api/signals returns live signals (fallback to DB seed data if engine fails)
+- Endpoint: GET /api/signals/live returns raw engine output with metadata
+
+## Part 2: HITL Approval Workflow
+
+### New DB Table: `pending_trades`
+```sql
+CREATE TABLE IF NOT EXISTS pending_trades (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  signal_id INTEGER,
+  ticker TEXT NOT NULL,
+  title TEXT NOT NULL,
+  side TEXT NOT NULL,
+  action TEXT NOT NULL,
+  contracts INTEGER NOT NULL,
+  price_cents INTEGER NOT NULL,
+  estimated_cost REAL NOT NULL,
+  max_profit REAL NOT NULL,
+  edge_score REAL NOT NULL,
+  model_confidence REAL NOT NULL,
+  model_name TEXT NOT NULL,
+  edge_source TEXT NOT NULL,
+  reasoning TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',  -- pending | approved | rejected | modified | executed | failed
+  auto_mode INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  decided_at TEXT,
+  executed_at TEXT,
+  order_id TEXT,
+  error_message TEXT
+);
+```
+
+### API Endpoints
+- `GET /api/pending-trades` — list pending trades
+- `POST /api/pending-trades/:id/approve` — approve a pending trade (executes it via Kalshi API if key configured)
+- `POST /api/pending-trades/:id/reject` — reject with optional reason
+- `POST /api/pending-trades/:id/modify` — modify contracts/price, then approve
+  Body: { contracts?: number, priceCents?: number }
+- `GET /api/bot/config` — get bot mode (auto/hitl) and auto-trade settings
+- `PUT /api/bot/config` — set bot mode + auto-trade thresholds
+
+### Auto-Trade Mode
+When bot mode = "auto", the signal engine automatically:
+1. Generates signals
+2. For signals meeting auto-trade criteria (edge > threshold, confidence > threshold):
+   - Creates pending_trade with auto_mode=1
+   - Immediately attempts to execute via Kalshi API
+   - Updates status to "executed" or "failed"
+3. Shows in HITL page as already-executed with details
+
+Auto-trade criteria (configurable):
+- Min edge: 5% (default)
+- Min confidence: 75% (default)
+- Max contracts per trade: 50 (default)
+- Max cost per trade: $50 (default)
+
+### HITL Mode (default)
+When bot mode = "hitl":
+1. Signal engine generates signals
+2. Signals above threshold become pending_trades with status="pending"
+3. Pending trades appear in the HITL page with Approve/Modify/Reject buttons
+4. User reviews and acts on each
+
+## Part 3: Enhanced HITL Page (client/src/pages/hitl.tsx)
+
+### Top Section: Mode Toggle + Stats
+- Toggle switch: "Auto Mode" / "Human in the Loop" (calls PUT /api/bot/config)
+- When Auto: show yellow banner "Auto-trading is ON. Bot will execute trades meeting your criteria."
+- Stats: Pending (count), Approved Today, Rejected Today, Executed Today
+
+### Each Trade Card Shows:
+- Event name + description (from EVENT_MAP or market title)
+- Edge type badge + edge source tag (e.g., "large misprice sports longshot")
+- Edge score, model confidence, model name
+- "Why this trade" reasoning paragraph (generated by signal engine)
+
+### Action Buttons (HITL mode):
+For each pending trade card:
+- **Approve** (green button) — opens confirmation dialog showing:
+  - Ticker, side, contracts, price, cost, max profit
+  - "This will place a real order on Kalshi"
+  - Confirm button executes via POST /api/pending-trades/:id/approve
+- **Modify** (blue button) — expands an inline edit panel:
+  - Contracts slider (1-1000)  
+  - Price input (cents, 1-99)
+  - Updated cost/profit display
+  - "Save & Approve" button → POST /api/pending-trades/:id/modify
+- **Reject** (red outline button) — marks as rejected, removes from pending
+
+### Executed Trades Section:
+Below pending trades, show a "Recently Executed" section with green checkmarks for approved trades and execution details (order ID, fill status).
+
+## Part 4: Settings Enhancement
+In the Settings page, add a "Bot Trading Mode" section:
+- Radio: "Human in the Loop" (default) / "Fully Automated"
+- When Automated, show threshold inputs:
+  - Min Edge %: slider 3-15, default 5
+  - Min Confidence %: slider 50-95, default 75
+  - Max Contracts per trade: input, default 50
+  - Max Cost per trade: input $, default 50
+- Warning banner when auto mode is selected: "Auto mode will execute trades without confirmation when signals meet your criteria."
+
+## TECHNICAL NOTES
+- The signal engine file already exists at /home/user/workspace/kalshi-bot/server/signal-engine.ts — integrate it
+- Add pending_trades table to the migration SQL in routes.ts
+- Add storage methods for pending trades CRUD
+- The HITL page at /home/user/workspace/kalshi-bot/client/src/pages/hitl.tsx needs to be rewritten to support the approval workflow
+- Keep the existing dark trading theme
+- When no private key is configured, show trades as "Preview Only" — can't execute
+- All trade execution goes through /api/live/orders (existing authenticated endpoint)
