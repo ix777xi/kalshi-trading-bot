@@ -16,9 +16,10 @@ import {
   AlertDialogHeader, AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { BarChart, Bar, XAxis, YAxis, Tooltip as RechartsTooltip, ResponsiveContainer, Cell } from "recharts";
-import { Search, ChevronLeft, TrendingUp, ShoppingCart } from "lucide-react";
+import { Search, ChevronLeft, TrendingUp, ShoppingCart, ExternalLink, AlertTriangle } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useToast } from "@/hooks/use-toast";
+import { format, parseISO } from "date-fns";
 
 type KalshiMarket = {
   ticker: string; title: string; subtitle?: string; status: string;
@@ -88,7 +89,7 @@ function OrderbookChart({ data }: { data: KalshiOrderbook | undefined }) {
   );
 }
 
-function TradePanel({ ticker, market }: { ticker: string; market: KalshiMarket | undefined }) {
+function TradePanel({ ticker, market, isDemo }: { ticker: string; market: KalshiMarket | undefined; isDemo: boolean }) {
   const { toast } = useToast();
   const [trade, setTrade] = useState<TradeForm>({
     side: "yes",
@@ -123,6 +124,15 @@ function TradePanel({ ticker, market }: { ticker: string; market: KalshiMarket |
   });
 
   const handlePlaceOrder = () => {
+    if (isDemo) {
+      toast({
+        title: "Demo Mode",
+        description: "Orders won't execute without a private key configured in Settings.",
+        variant: "destructive",
+      });
+      setShowConfirm(false);
+      return;
+    }
     const orderBody = {
       ticker,
       side: trade.side,
@@ -142,9 +152,21 @@ function TradePanel({ ticker, market }: { ticker: string; market: KalshiMarket |
         <CardHeader className="p-4 pb-2 flex flex-row items-center gap-2">
           <ShoppingCart className="w-4 h-4 text-primary" />
           <CardTitle className="text-sm font-medium">Place Trade</CardTitle>
-          <Badge variant="outline" className="ml-auto text-xs text-primary border-primary/40">LIVE</Badge>
+          {isDemo ? (
+            <Badge variant="outline" className="ml-auto text-xs text-yellow-400 border-yellow-400/40">DEMO</Badge>
+          ) : (
+            <Badge variant="outline" className="ml-auto text-xs text-primary border-primary/40">LIVE</Badge>
+          )}
         </CardHeader>
         <CardContent className="p-4 pt-0 space-y-4">
+          {/* Demo Mode Banner */}
+          {isDemo && (
+            <div className="flex items-start gap-2 p-3 rounded-md bg-yellow-500/10 border border-yellow-500/30 text-xs text-yellow-400">
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+              <span>Demo Mode — orders won't execute. Configure your RSA private key in <span className="underline cursor-pointer" onClick={() => window.location.hash = "#/settings"}>Settings</span> to enable live trading.</span>
+            </div>
+          )}
+
           {/* Side toggle */}
           <div className="space-y-1.5">
             <Label className="text-xs text-muted-foreground">Side</Label>
@@ -278,6 +300,12 @@ function TradePanel({ ticker, market }: { ticker: string; market: KalshiMarket |
             <AlertDialogTitle>Confirm Order</AlertDialogTitle>
             <AlertDialogDescription asChild>
               <div className="space-y-3 text-sm">
+                {isDemo && (
+                  <div className="flex items-center gap-2 p-2 rounded-md bg-yellow-500/10 border border-yellow-500/30 text-xs text-yellow-400">
+                    <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                    Demo Mode — this order will NOT be sent to Kalshi.
+                  </div>
+                )}
                 <div className="grid grid-cols-2 gap-2 p-3 rounded-md bg-muted/40 text-xs">
                   <div>
                     <span className="text-muted-foreground">Market</span>
@@ -309,9 +337,11 @@ function TradePanel({ ticker, market }: { ticker: string; market: KalshiMarket |
                 {trade.postOnly && (
                   <p className="text-xs text-muted-foreground">Post Only — order will only rest on the book (reduced fees).</p>
                 )}
-                <p className="text-xs text-muted-foreground">
-                  This will place a real order on Kalshi. Please review carefully before confirming.
-                </p>
+                {!isDemo && (
+                  <p className="text-xs text-muted-foreground">
+                    This will place a real order on Kalshi. Please review carefully before confirming.
+                  </p>
+                )}
               </div>
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -322,7 +352,7 @@ function TradePanel({ ticker, market }: { ticker: string; market: KalshiMarket |
               onClick={handlePlaceOrder}
               disabled={placeMutation.isPending}
             >
-              {placeMutation.isPending ? "Placing..." : "Confirm Order"}
+              {placeMutation.isPending ? "Placing..." : isDemo ? "Confirm (Demo)" : "Confirm Order"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -396,11 +426,12 @@ export default function Markets() {
 
   const selectedMarket = markets.find(m => m.ticker === selectedTicker);
   const hasPrivateKey = settingsData?.hasPrivateKey ?? false;
+  const isDemo = !hasPrivateKey;
 
   if (selectedTicker) {
     return (
       <div className="p-4 space-y-4">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <Button variant="ghost" size="sm" onClick={() => setSelectedTicker(null)} data-testid="button-back">
             <ChevronLeft className="w-4 h-4" /> Back
           </Button>
@@ -408,13 +439,24 @@ export default function Markets() {
           {selectedMarket && (
             <Badge variant="outline" className="text-xs">{selectedMarket.category || "—"}</Badge>
           )}
+          <a
+            href={`https://kalshi.com/markets/${selectedTicker}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="ml-auto"
+          >
+            <Button variant="outline" size="sm" className="text-xs gap-1.5" data-testid="button-view-kalshi">
+              <ExternalLink className="w-3.5 h-3.5" />
+              View on Kalshi
+            </Button>
+          </a>
         </div>
 
         {selectedMarket && (
           <Card>
             <CardContent className="p-4">
               <div className="text-sm font-medium mb-3">{selectedMarket.title}</div>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+              <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3 text-xs">
                 <div>
                   <div className="text-muted-foreground">YES Bid</div>
                   <div className="mono text-profit font-medium">{parseFloat(selectedMarket.yes_bid_dollars) > 0 ? `${(parseFloat(selectedMarket.yes_bid_dollars) * 100).toFixed(1)}¢` : "—"}</div>
@@ -424,6 +466,10 @@ export default function Markets() {
                   <div className="mono text-loss font-medium">{parseFloat(selectedMarket.no_bid_dollars) > 0 ? `${(parseFloat(selectedMarket.no_bid_dollars) * 100).toFixed(1)}¢` : "—"}</div>
                 </div>
                 <div>
+                  <div className="text-muted-foreground">Last Price</div>
+                  <div className="mono">{parseFloat(selectedMarket.last_price_dollars) > 0 ? `${(parseFloat(selectedMarket.last_price_dollars) * 100).toFixed(1)}¢` : "—"}</div>
+                </div>
+                <div>
                   <div className="text-muted-foreground">Volume</div>
                   <div className="mono">{parseFloat(selectedMarket.volume_fp) > 0 ? parseFloat(selectedMarket.volume_fp).toLocaleString() : "—"}</div>
                 </div>
@@ -431,12 +477,28 @@ export default function Markets() {
                   <div className="text-muted-foreground">Open Interest</div>
                   <div className="mono">{parseFloat(selectedMarket.open_interest_fp) > 0 ? parseFloat(selectedMarket.open_interest_fp).toLocaleString() : "—"}</div>
                 </div>
+                <div>
+                  <div className="text-muted-foreground">Closes</div>
+                  <div className="mono text-xs">
+                    {selectedMarket.close_time
+                      ? (() => {
+                          try { return format(parseISO(selectedMarket.close_time), "MM/dd HH:mm"); }
+                          catch { return selectedMarket.close_time.slice(0, 10); }
+                        })()
+                      : "—"}
+                  </div>
+                </div>
               </div>
+              {selectedMarket.event_ticker && (
+                <div className="mt-3 text-xs text-muted-foreground">
+                  Event: <span className="mono text-foreground/70">{selectedMarket.event_ticker}</span>
+                </div>
+              )}
             </CardContent>
           </Card>
         )}
 
-        <div className={`grid gap-4 ${hasPrivateKey ? "grid-cols-1 lg:grid-cols-2" : "grid-cols-1"}`}>
+        <div className="grid gap-4 grid-cols-1 lg:grid-cols-2">
           <Card>
             <CardHeader className="p-4 pb-2">
               <CardTitle className="text-sm font-medium">Orderbook Depth</CardTitle>
@@ -455,16 +517,9 @@ export default function Markets() {
             </CardContent>
           </Card>
 
-          {hasPrivateKey && (
-            <TradePanel ticker={selectedTicker} market={selectedMarket} />
-          )}
+          {/* Trade Panel — always shown, demo banner inside */}
+          <TradePanel ticker={selectedTicker} market={selectedMarket} isDemo={isDemo} />
         </div>
-
-        {!hasPrivateKey && (
-          <div className="text-xs text-muted-foreground text-center p-3 rounded-md border border-border/50 bg-muted/20">
-            Configure your RSA private key in <span className="text-primary">Settings</span> to enable live trading.
-          </div>
-        )}
       </div>
     );
   }

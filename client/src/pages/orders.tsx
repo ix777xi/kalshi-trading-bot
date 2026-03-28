@@ -12,7 +12,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { useState } from "react";
 import { format, parseISO } from "date-fns";
-import { XCircle, Filter, Zap, Database } from "lucide-react";
+import { XCircle, Filter, Zap, Database, RefreshCw } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
 // Demo order type (from local DB)
@@ -50,6 +50,7 @@ export default function Orders() {
   const [filterStatus, setFilterStatus] = useState("all");
   const [mode, setMode] = useState<"demo" | "live">("demo");
   const [showCancelAllConfirm, setShowCancelAllConfirm] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const { toast } = useToast();
 
   const { data: settingsData } = useQuery<Settings>({
@@ -59,14 +60,14 @@ export default function Orders() {
   const isLive = mode === "live" && hasPrivateKey;
 
   // Demo orders
-  const { data: demoOrders, isLoading: demoLoading } = useQuery<DemoOrder[]>({
+  const { data: demoOrders, isLoading: demoLoading, refetch: refetchDemo } = useQuery<DemoOrder[]>({
     queryKey: ["/api/orders"],
     refetchInterval: 15000,
     enabled: !isLive,
   });
 
   // Live orders
-  const { data: liveOrdersData, isLoading: liveLoading } = useQuery<{ orders: LiveOrder[] }>({
+  const { data: liveOrdersData, isLoading: liveLoading, refetch: refetchLive } = useQuery<{ orders: LiveOrder[] }>({
     queryKey: ["/api/live/orders"],
     refetchInterval: 10000,
     enabled: isLive,
@@ -74,12 +75,31 @@ export default function Orders() {
 
   const isLoading = isLive ? liveLoading : demoLoading;
 
+  const handleRefresh = async () => {
+    setIsRefreshing(true);
+    try {
+      if (isLive) {
+        await refetchLive();
+        const count = liveOrdersData?.orders?.length || 0;
+        toast({ title: "Orders refreshed", description: `${count} orders loaded.` });
+      } else {
+        await refetchDemo();
+        const count = demoOrders?.length || 0;
+        toast({ title: "Orders refreshed", description: `${count} orders loaded.` });
+      }
+    } catch (e: any) {
+      toast({ title: "Refresh failed", description: e?.message, variant: "destructive" });
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
   // Cancel live order
   const cancelLiveMutation = useMutation({
     mutationFn: (orderId: string) => apiRequest("DELETE", `/api/live/orders/${orderId}`),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/live/orders"] });
-      toast({ title: "Order cancelled" });
+      toast({ title: "Order cancelled", description: "The order has been cancelled." });
     },
     onError: (e: any) => {
       toast({ title: "Cancel failed", description: e?.message, variant: "destructive" });
@@ -91,7 +111,10 @@ export default function Orders() {
     mutationFn: (id: number) => apiRequest("DELETE", `/api/orders/${id}`),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/orders"] });
-      toast({ title: "Order cancelled" });
+      toast({ title: "Order cancelled", description: "The demo order has been cancelled." });
+    },
+    onError: (e: any) => {
+      toast({ title: "Cancel failed", description: e?.message, variant: "destructive" });
     },
   });
 
@@ -100,7 +123,24 @@ export default function Orders() {
     mutationFn: () => apiRequest("DELETE", "/api/live/orders"),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/live/orders"] });
-      toast({ title: "All orders cancelled" });
+      toast({ title: "All orders cancelled", description: `All ${openCount} open orders have been cancelled.` });
+      setShowCancelAllConfirm(false);
+    },
+    onError: (e: any) => {
+      toast({ title: "Cancel all failed", description: e?.message, variant: "destructive" });
+      setShowCancelAllConfirm(false);
+    },
+  });
+
+  // Cancel all demo orders mutation
+  const cancelAllDemoMutation = useMutation({
+    mutationFn: async () => {
+      const openOrders = (demoOrders || []).filter(o => o.status === "open");
+      await Promise.all(openOrders.map(o => apiRequest("DELETE", `/api/orders/${o.id}`)));
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/orders"] });
+      toast({ title: "All orders cancelled", description: `All ${openCount} open demo orders have been cancelled.` });
       setShowCancelAllConfirm(false);
     },
     onError: (e: any) => {
@@ -199,26 +239,32 @@ export default function Orders() {
           </SelectContent>
         </Select>
 
-        {isLive && openCount > 0 && (
+        <Button
+          variant="outline"
+          size="sm"
+          className="text-xs gap-1.5"
+          data-testid="button-refresh-orders"
+          onClick={handleRefresh}
+          disabled={isRefreshing || isLoading}
+        >
+          <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? "animate-spin" : ""}`} />
+          Refresh
+        </Button>
+
+        {openCount > 0 && (
           <Button
             variant="destructive"
             size="sm"
             className="text-xs ml-auto"
             data-testid="button-cancel-all"
             onClick={() => setShowCancelAllConfirm(true)}
-            disabled={cancelAllMutation.isPending}
+            disabled={cancelAllMutation.isPending || cancelAllDemoMutation.isPending}
           >
-            Cancel All Orders
-          </Button>
-        )}
-
-        {!isLive && openCount > 0 && (
-          <Button variant="destructive" size="sm" className="text-xs ml-auto" data-testid="button-cancel-all">
             Cancel All Open
           </Button>
         )}
 
-        <div className={`text-xs text-muted-foreground mono ${!(isLive && openCount > 0) && !(!isLive && openCount > 0) ? "ml-auto" : ""}`}>
+        <div className={`text-xs text-muted-foreground mono ${openCount === 0 ? "ml-auto" : ""}`}>
           {isLive
             ? `${(liveOrdersData?.orders || []).length} orders`
             : `${(demoOrders || []).length} orders`
@@ -385,18 +431,18 @@ export default function Orders() {
           <AlertDialogHeader>
             <AlertDialogTitle>Cancel All Orders</AlertDialogTitle>
             <AlertDialogDescription>
-              This will cancel all {openCount} resting order{openCount !== 1 ? "s" : ""} on Kalshi. This action cannot be undone.
+              Are you sure? This will cancel {openCount} open order{openCount !== 1 ? "s" : ""} {isLive ? "on Kalshi" : "in demo"}. This action cannot be undone.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel data-testid="button-cancel-all-cancel">Cancel</AlertDialogCancel>
             <AlertDialogAction
               data-testid="button-cancel-all-confirm"
-              onClick={() => cancelAllMutation.mutate()}
-              disabled={cancelAllMutation.isPending}
+              onClick={() => isLive ? cancelAllMutation.mutate() : cancelAllDemoMutation.mutate()}
+              disabled={cancelAllMutation.isPending || cancelAllDemoMutation.isPending}
               className="bg-destructive hover:bg-destructive/90"
             >
-              {cancelAllMutation.isPending ? "Cancelling..." : "Cancel All Orders"}
+              {(cancelAllMutation.isPending || cancelAllDemoMutation.isPending) ? "Cancelling..." : "Cancel All Orders"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

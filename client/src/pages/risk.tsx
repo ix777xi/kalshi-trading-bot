@@ -10,7 +10,7 @@ import { useToast } from "@/hooks/use-toast";
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceLine
 } from "recharts";
-import { Shield, AlertTriangle, Save, CheckCircle2, Clock, XCircle } from "lucide-react";
+import { Shield, AlertTriangle, Save, CheckCircle2, Clock, XCircle, RotateCcw } from "lucide-react";
 
 const RISK_IMPERATIVES = [
   {
@@ -56,6 +56,7 @@ const RISK_IMPERATIVES = [
     statusFn: (_cfg: any) => "yellow",
   },
 ];
+
 import { useQuery as usePortfolioQuery } from "@tanstack/react-query";
 import { format, parseISO } from "date-fns";
 
@@ -66,6 +67,17 @@ type RiskConfig = {
 };
 
 type PnlHistory = { timestamp: string; cumulativePnl: number; dailyPnl: number; balance: number };
+
+const DEFAULT_RISK_CONFIG = {
+  maxPositionPct: 5,
+  maxCategoryExposurePct: 20,
+  kellyFractionMin: 0.25,
+  kellyFractionMax: 0.50,
+  stopLossThreshold: 50,
+  takeProfitTarget: 75,
+  maxDrawdownPause: 10,
+  dailyVaR: 2.5,
+};
 
 function RiskSlider({ label, value, min, max, step = 1, unit = "%", onChange }: {
   label: string; value: number; min: number; max: number; step?: number; unit?: string; onChange: (v: number) => void;
@@ -82,6 +94,20 @@ function RiskSlider({ label, value, min, max, step = 1, unit = "%", onChange }: 
         className="w-full"
       />
     </div>
+  );
+}
+
+function isDirty(form: Partial<RiskConfig>, saved: RiskConfig | undefined): boolean {
+  if (!saved) return false;
+  return (
+    form.maxPositionPct !== saved.maxPositionPct ||
+    form.maxCategoryExposurePct !== saved.maxCategoryExposurePct ||
+    form.kellyFractionMin !== saved.kellyFractionMin ||
+    form.kellyFractionMax !== saved.kellyFractionMax ||
+    form.stopLossThreshold !== saved.stopLossThreshold ||
+    form.takeProfitTarget !== saved.takeProfitTarget ||
+    form.maxDrawdownPause !== saved.maxDrawdownPause ||
+    form.dailyVaR !== saved.dailyVaR
   );
 }
 
@@ -102,13 +128,26 @@ export default function Risk() {
     if (config) setForm(config);
   }, [config]);
 
+  const dirty = isDirty(form, config);
+
   const updateMutation = useMutation({
     mutationFn: (data: Partial<RiskConfig>) => apiRequest("PUT", "/api/risk/config", data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/risk/config"] });
-      toast({ title: "Risk config saved" });
+      toast({ title: "Risk config saved", description: "Your risk configuration has been saved." });
+    },
+    onError: (e: any) => {
+      toast({ title: "Save failed", description: e?.message || "Failed to save risk config", variant: "destructive" });
     },
   });
+
+  const handleResetDefaults = () => {
+    setForm(f => ({
+      ...f,
+      ...DEFAULT_RISK_CONFIG,
+    }));
+    toast({ title: "Reset to defaults", description: "Sliders reset to recommended defaults. Click Save to apply." });
+  };
 
   const pnlHistory = portfolioData?.pnlHistory || [];
 
@@ -156,6 +195,11 @@ export default function Risk() {
           <CardHeader className="p-4 pb-2 flex flex-row items-center gap-2">
             <Shield className="w-4 h-4 text-primary" />
             <CardTitle className="text-sm font-medium">Risk Configuration</CardTitle>
+            {dirty && (
+              <Badge variant="secondary" className="ml-auto text-xs text-warning-amt border-warning-amt/40 bg-warning-amt/10">
+                Unsaved Changes
+              </Badge>
+            )}
           </CardHeader>
           <CardContent className="p-4 pt-0 space-y-5">
             {isLoading ? (
@@ -203,15 +247,26 @@ export default function Risk() {
                   onChange={v => setForm(f => ({ ...f, dailyVaR: v }))}
                 />
 
-                <Button
-                  className="w-full"
-                  data-testid="button-save-risk"
-                  onClick={() => updateMutation.mutate(form)}
-                  disabled={updateMutation.isPending}
-                >
-                  <Save className="w-4 h-4 mr-2" />
-                  {updateMutation.isPending ? "Saving..." : "Save Configuration"}
-                </Button>
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    className="flex-1 text-xs"
+                    data-testid="button-reset-defaults"
+                    onClick={handleResetDefaults}
+                  >
+                    <RotateCcw className="w-3.5 h-3.5 mr-1.5" />
+                    Reset to Defaults
+                  </Button>
+                  <Button
+                    className="flex-1"
+                    data-testid="button-save-risk"
+                    onClick={() => updateMutation.mutate(form)}
+                    disabled={updateMutation.isPending}
+                  >
+                    <Save className="w-4 h-4 mr-2" />
+                    {updateMutation.isPending ? "Saving..." : "Save Configuration"}
+                  </Button>
+                </div>
               </>
             )}
           </CardContent>

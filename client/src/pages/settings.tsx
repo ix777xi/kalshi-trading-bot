@@ -10,9 +10,14 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { Slider } from "@/components/ui/slider";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel,
+  AlertDialogContent, AlertDialogDescription, AlertDialogFooter,
+  AlertDialogHeader, AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { useState, useEffect } from "react";
 import { useToast } from "@/hooks/use-toast";
-import { Save, Play, Pause, Square, Key, Bell, Bot, Cpu, Wifi, WifiOff, TestTube } from "lucide-react";
+import { Save, Play, Pause, Square, Key, Bell, Bot, Cpu, Wifi, WifiOff, TestTube, Trash2, CheckCircle2, XCircle } from "lucide-react";
 
 type Settings = {
   id: number; kalshiApiKey: string; kalshiApiKeyId: string;
@@ -40,21 +45,43 @@ export default function SettingsPage() {
   const [privateKeyInput, setPrivateKeyInput] = useState("");
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>("idle");
   const [connectionMsg, setConnectionMsg] = useState("");
+  const [showClearKeyConfirm, setShowClearKeyConfirm] = useState(false);
 
   useEffect(() => {
     if (settings) {
       setForm(settings);
-      // Don't populate private key - show placeholder if exists
     }
   }, [settings]);
 
   const updateSettings = useMutation({
     mutationFn: (data: Partial<Settings & { kalshiPrivateKey: string }>) =>
       apiRequest("PUT", "/api/settings", data),
-    onSuccess: () => {
+    onSuccess: async () => {
       queryClient.invalidateQueries({ queryKey: ["/api/settings"] });
       setPrivateKeyInput(""); // Clear the input after save
-      toast({ title: "Settings saved" });
+      toast({ title: "Settings saved", description: "Your settings have been saved successfully." });
+      // Auto-test connection if a private key was provided or exists
+      if (privateKeyInput.trim() || settings?.hasPrivateKey) {
+        await handleTestConnection();
+      }
+    },
+    onError: (e: any) => {
+      toast({ title: "Save failed", description: e?.message || "Failed to save settings", variant: "destructive" });
+    },
+  });
+
+  const clearKeyMutation = useMutation({
+    mutationFn: () => apiRequest("PUT", "/api/settings", { clearPrivateKey: true }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/settings"] });
+      setConnectionStatus("idle");
+      setConnectionMsg("");
+      setShowClearKeyConfirm(false);
+      toast({ title: "Private key cleared", description: "Your RSA private key has been removed." });
+    },
+    onError: (e: any) => {
+      toast({ title: "Clear failed", description: e?.message || "Failed to clear key", variant: "destructive" });
+      setShowClearKeyConfirm(false);
     },
   });
 
@@ -62,7 +89,10 @@ export default function SettingsPage() {
     mutationFn: (action: string) => apiRequest("POST", "/api/bot/control", { action }),
     onSuccess: (_, action) => {
       queryClient.invalidateQueries({ queryKey: ["/api/portfolio"] });
-      toast({ title: `Bot ${action}` });
+      toast({ title: `Bot ${action}`, description: `Bot has been set to ${action}.` });
+    },
+    onError: (e: any) => {
+      toast({ title: "Bot control failed", description: e?.message, variant: "destructive" });
     },
   });
 
@@ -76,16 +106,20 @@ export default function SettingsPage() {
         const balanceDollars = (data.balance / 100).toFixed(2);
         setConnectionStatus("connected");
         setConnectionMsg(`Connected — Balance: $${balanceDollars}`);
+        toast({ title: "Connection successful", description: `Balance: $${balanceDollars}` });
       } else if (data?.error) {
         setConnectionStatus("failed");
         setConnectionMsg(data.error);
+        toast({ title: "Connection failed", description: data.error, variant: "destructive" });
       } else {
         setConnectionStatus("connected");
         setConnectionMsg("Connected successfully");
+        toast({ title: "Connection successful" });
       }
     } catch (e: any) {
       setConnectionStatus("failed");
       setConnectionMsg(e?.message || "Connection failed");
+      toast({ title: "Connection failed", description: e?.message || "Connection failed", variant: "destructive" });
     }
   };
 
@@ -192,7 +226,7 @@ export default function SettingsPage() {
               </div>
 
               {/* Connection Test */}
-              <div className="flex items-center gap-3 pt-1">
+              <div className="flex flex-wrap items-center gap-3 pt-1">
                 <Button
                   variant="secondary"
                   size="sm"
@@ -203,22 +237,45 @@ export default function SettingsPage() {
                   <TestTube className="w-3.5 h-3.5 mr-1.5" />
                   {connectionStatus === "testing" ? "Testing..." : "Test Connection"}
                 </Button>
-                {connectionStatus === "connected" && (
-                  <div className="flex items-center gap-1.5 text-xs text-profit" data-testid="status-connection-ok">
-                    <Wifi className="w-3.5 h-3.5" />
-                    <span>{connectionMsg}</span>
-                  </div>
+
+                {settings?.hasPrivateKey && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="text-xs text-loss border-loss/40 hover:bg-loss/10"
+                    data-testid="button-clear-private-key"
+                    onClick={() => setShowClearKeyConfirm(true)}
+                    disabled={clearKeyMutation.isPending}
+                  >
+                    <Trash2 className="w-3.5 h-3.5 mr-1.5" />
+                    Clear Private Key
+                  </Button>
                 )}
-                {connectionStatus === "failed" && (
-                  <div className="flex items-center gap-1.5 text-xs text-loss" data-testid="status-connection-fail">
-                    <WifiOff className="w-3.5 h-3.5" />
-                    <span>{connectionMsg}</span>
-                  </div>
-                )}
+
                 {connectionStatus === "idle" && !settings?.hasPrivateKey && (
                   <span className="text-xs text-muted-foreground">Save a private key first to test</span>
                 )}
               </div>
+
+              {/* Connection status — more prominent */}
+              {connectionStatus === "connected" && (
+                <div className="flex items-center gap-2.5 p-3 rounded-md bg-profit/10 border border-profit/30" data-testid="status-connection-ok">
+                  <CheckCircle2 className="w-4 h-4 text-profit shrink-0" />
+                  <div>
+                    <div className="text-xs font-medium text-profit">Connected</div>
+                    <div className="text-xs text-muted-foreground">{connectionMsg}</div>
+                  </div>
+                </div>
+              )}
+              {connectionStatus === "failed" && (
+                <div className="flex items-center gap-2.5 p-3 rounded-md bg-loss/10 border border-loss/30" data-testid="status-connection-fail">
+                  <XCircle className="w-4 h-4 text-loss shrink-0" />
+                  <div>
+                    <div className="text-xs font-medium text-loss">Connection Failed</div>
+                    <div className="text-xs text-muted-foreground">{connectionMsg}</div>
+                  </div>
+                </div>
+              )}
             </>
           )}
         </CardContent>
@@ -324,6 +381,29 @@ export default function SettingsPage() {
         <Save className="w-4 h-4 mr-2" />
         {updateSettings.isPending ? "Saving..." : "Save Settings"}
       </Button>
+
+      {/* Clear Key Confirmation Dialog */}
+      <AlertDialog open={showClearKeyConfirm} onOpenChange={setShowClearKeyConfirm}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Clear Private Key</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to remove your RSA private key? Live trading will be disabled until you add a new key.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              data-testid="button-confirm-clear-key"
+              onClick={() => clearKeyMutation.mutate()}
+              disabled={clearKeyMutation.isPending}
+              className="bg-destructive hover:bg-destructive/90"
+            >
+              {clearKeyMutation.isPending ? "Clearing..." : "Clear Private Key"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

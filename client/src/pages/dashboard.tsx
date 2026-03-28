@@ -1,6 +1,8 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation } from "@tanstack/react-query";
+import { queryClient, apiRequest } from "@/lib/queryClient";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceLine,
@@ -8,9 +10,12 @@ import {
 } from "recharts";
 import {
   TrendingUp, TrendingDown, DollarSign, Activity, Percent,
-  BarChart2, AlertTriangle, CheckCircle2, Clock, Zap, ShieldAlert
+  BarChart2, AlertTriangle, CheckCircle2, Clock, Zap, ShieldAlert,
+  ShoppingCart, XCircle, PauseCircle
 } from "lucide-react";
 import { format, parseISO } from "date-fns";
+import { useLocation } from "wouter";
+import { useToast } from "@/hooks/use-toast";
 
 const CATEGORY_EDGE_DATA = [
   { category: "World Events", gap: 7.32, color: "#b91c1c" },
@@ -34,9 +39,15 @@ type PnlHistory = { timestamp: string; cumulativePnl: number; dailyPnl: number; 
 type Agent = { id: number; name: string; status: string; lastHeartbeat: string; messagesProcessed: number; errorCount: number; latencyMs: number; description: string };
 type Signal = { id: number; ticker: string; edgeScore: number; trueProbability: number; marketPrice: number; signalType: string; modelConfidence: number; modelName: string; createdAt: string };
 
-function KpiCard({ label, value, sub, positive, icon: Icon }: { label: string; value: string; sub?: string; positive?: boolean; icon: any }) {
+function KpiCard({ label, value, sub, positive, icon: Icon, href }: { label: string; value: string; sub?: string; positive?: boolean; icon: any; href?: string }) {
+  const [, navigate] = useLocation();
+
   return (
-    <Card data-testid={`kpi-${label.toLowerCase().replace(/\s/g, '-')}`}>
+    <Card
+      data-testid={`kpi-${label.toLowerCase().replace(/\s/g, '-')}`}
+      className={href ? "cursor-pointer hover:bg-muted/50 transition-colors" : ""}
+      onClick={href ? () => navigate(href) : undefined}
+    >
       <CardContent className="p-4">
         <div className="flex items-center justify-between gap-1 mb-2">
           <span className="text-xs text-muted-foreground uppercase tracking-wider">{label}</span>
@@ -79,6 +90,9 @@ type Settings = { hasPrivateKey: boolean };
 type LiveBalance = { balance: number; portfolio_value?: number };
 
 export default function Dashboard() {
+  const [, navigate] = useLocation();
+  const { toast } = useToast();
+
   const { data: portfolioData, isLoading: pLoading } = useQuery<{ portfolio: Portfolio; pnlHistory: PnlHistory[] }>({
     queryKey: ["/api/portfolio"],
     refetchInterval: 30000,
@@ -102,6 +116,28 @@ export default function Dashboard() {
   const { data: signals } = useQuery<Signal[]>({
     queryKey: ["/api/signals"],
     refetchInterval: 30000,
+  });
+
+  const cancelAllMutation = useMutation({
+    mutationFn: () => apiRequest("DELETE", "/api/live/orders"),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/live/orders"] });
+      toast({ title: "All orders cancelled", description: "All open orders have been cancelled." });
+    },
+    onError: (e: any) => {
+      toast({ title: "Cancel failed", description: e?.message || "Failed to cancel orders", variant: "destructive" });
+    },
+  });
+
+  const controlBotMutation = useMutation({
+    mutationFn: (action: string) => apiRequest("POST", "/api/bot/control", { action }),
+    onSuccess: (_, action) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/portfolio"] });
+      toast({ title: `Bot ${action}`, description: `The bot has been set to ${action}.` });
+    },
+    onError: (e: any) => {
+      toast({ title: "Bot control failed", description: e?.message || "Failed to control bot", variant: "destructive" });
+    },
   });
 
   const portfolio = portfolioData?.portfolio;
@@ -133,15 +169,61 @@ export default function Dashboard() {
                 }
                 sub={hasPrivateKey ? "Live" : "Demo"}
                 icon={DollarSign}
+                href="/positions"
               />
-            <KpiCard label="Unrealized P&L" value={`${portfolio?.unrealizedPnl >= 0 ? "+" : ""}$${portfolio?.unrealizedPnl?.toFixed(2) || "0.00"}`} positive={portfolio?.unrealizedPnl >= 0} icon={TrendingUp} />
-            <KpiCard label="Realized P&L" value={`${portfolio?.realizedPnl >= 0 ? "+" : ""}$${portfolio?.realizedPnl?.toFixed(2) || "0.00"}`} positive={portfolio?.realizedPnl >= 0} icon={TrendingDown} />
-            <KpiCard label="Total Return" value={`${portfolio?.totalReturn?.toFixed(2) || "0.00"}%`} positive={portfolio?.totalReturn >= 0} icon={Percent} sub="All time" />
-            <KpiCard label="Win Rate" value={`${portfolio?.winRate?.toFixed(1) || "0.0"}%`} positive={portfolio?.winRate >= 50} icon={Activity} />
-            <KpiCard label="Sharpe Ratio" value={portfolio?.sharpeRatio?.toFixed(2) || "0.00"} positive={portfolio?.sharpeRatio >= 1} icon={BarChart2} sub="Annualized" />
-            <KpiCard label="Positions" value={String(portfolio?.activePositions || 0)} icon={Zap} sub={`Max DD ${portfolio?.maxDrawdown?.toFixed(1)}%`} />
+            <KpiCard label="Unrealized P&L" value={`${portfolio?.unrealizedPnl >= 0 ? "+" : ""}$${portfolio?.unrealizedPnl?.toFixed(2) || "0.00"}`} positive={portfolio?.unrealizedPnl >= 0} icon={TrendingUp} href="/positions" />
+            <KpiCard label="Realized P&L" value={`${portfolio?.realizedPnl >= 0 ? "+" : ""}$${portfolio?.realizedPnl?.toFixed(2) || "0.00"}`} positive={portfolio?.realizedPnl >= 0} icon={TrendingDown} href="/orders" />
+            <KpiCard label="Total Return" value={`${portfolio?.totalReturn?.toFixed(2) || "0.00"}%`} positive={portfolio?.totalReturn >= 0} icon={Percent} sub="All time" href="/backtest" />
+            <KpiCard label="Win Rate" value={`${portfolio?.winRate?.toFixed(1) || "0.0"}%`} positive={portfolio?.winRate >= 50} icon={Activity} href="/backtest" />
+            <KpiCard label="Sharpe Ratio" value={portfolio?.sharpeRatio?.toFixed(2) || "0.00"} positive={portfolio?.sharpeRatio >= 1} icon={BarChart2} sub="Annualized" href="/backtest" />
+            <KpiCard label="Positions" value={String(portfolio?.activePositions || 0)} icon={Zap} sub={`Max DD ${portfolio?.maxDrawdown?.toFixed(1)}%`} href="/positions" />
           </>
         )}
+      </div>
+
+      {/* Quick Actions Row */}
+      <div className="flex flex-wrap gap-2">
+        <Button
+          size="sm"
+          className="text-xs gap-1.5"
+          data-testid="button-quick-place-trade"
+          onClick={() => navigate("/markets")}
+        >
+          <ShoppingCart className="w-3.5 h-3.5" />
+          Place Trade
+        </Button>
+        <Button
+          size="sm"
+          variant="destructive"
+          className="text-xs gap-1.5"
+          data-testid="button-quick-cancel-all"
+          onClick={() => {
+            if (!hasPrivateKey) {
+              toast({ title: "Demo Mode", description: "Connect a private key to cancel live orders.", variant: "destructive" });
+              return;
+            }
+            cancelAllMutation.mutate();
+          }}
+          disabled={cancelAllMutation.isPending}
+        >
+          <XCircle className="w-3.5 h-3.5" />
+          {cancelAllMutation.isPending ? "Cancelling..." : "Cancel All Orders"}
+        </Button>
+        <Button
+          size="sm"
+          variant="secondary"
+          className="text-xs gap-1.5"
+          data-testid="button-quick-pause-bot"
+          onClick={() => {
+            const currentStatus = portfolio?.botStatus || "stopped";
+            const action = currentStatus === "paused" ? "running" : "paused";
+            controlBotMutation.mutate(action);
+          }}
+          disabled={controlBotMutation.isPending}
+        >
+          <PauseCircle className="w-3.5 h-3.5" />
+          {portfolio?.botStatus === "paused" ? "Resume Bot" : "Pause Bot"}
+        </Button>
       </div>
 
       {/* P&L Chart + Agents */}
@@ -307,7 +389,7 @@ export default function Dashboard() {
                   const isNeg = sig.signalType === "BUY_NO";
                   const isNo = sig.signalType === "NO_TRADE";
                   return (
-                    <tr key={sig.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors" data-testid={`signal-row-${sig.id}`}>
+                    <tr key={sig.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors cursor-pointer" data-testid={`signal-row-${sig.id}`} onClick={() => navigate("/signals")}>
                       <td className="px-4 py-2 text-muted-foreground mono">{format(parseISO(sig.createdAt), "HH:mm")}</td>
                       <td className="px-4 py-2 font-medium mono">{sig.ticker}</td>
                       <td className="px-4 py-2">

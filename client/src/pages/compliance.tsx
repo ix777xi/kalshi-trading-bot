@@ -1,10 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { format, parseISO } from "date-fns";
-import { Download, AlertTriangle, CheckCircle2, Info } from "lucide-react";
+import { Download, AlertTriangle, CheckCircle2, Info, Search } from "lucide-react";
 
 type AuditLog = {
   id: number; eventType: string; ticker?: string; description: string;
@@ -23,7 +26,7 @@ function eventBadge(type: string) {
   };
   return (
     <Badge variant="outline" className={`text-xs ${map[type] || ""}`}>
-      {type.replace("_", " ")}
+      {type.replace(/_/g, " ")}
     </Badge>
   );
 }
@@ -47,7 +50,15 @@ function downloadCSV(logs: AuditLog[]) {
   a.click();
 }
 
+const EVENT_TYPES = [
+  "ORDER_PLACED", "ORDER_FILLED", "ORDER_CANCELLED",
+  "RISK_BREACH", "BOT_CONTROL", "POSITION_OPENED", "POSITION_CLOSED"
+];
+
 export default function Compliance() {
+  const [eventTypeFilter, setEventTypeFilter] = useState("all");
+  const [tickerSearch, setTickerSearch] = useState("");
+
   const { data: logs, isLoading } = useQuery<AuditLog[]>({
     queryKey: ["/api/audit"],
   });
@@ -55,6 +66,13 @@ export default function Compliance() {
   const warnings = (logs || []).filter(l => l.status === "warning").length;
   const orders = (logs || []).filter(l => l.eventType.startsWith("ORDER")).length;
   const riskBreaches = (logs || []).filter(l => l.eventType === "RISK_BREACH").length;
+
+  // Client-side filtering
+  const filteredLogs = (logs || []).filter(l => {
+    if (eventTypeFilter !== "all" && l.eventType !== eventTypeFilter) return false;
+    if (tickerSearch && !(l.ticker || "").toLowerCase().includes(tickerSearch.toLowerCase())) return false;
+    return true;
+  });
 
   return (
     <div className="p-4 space-y-4">
@@ -74,19 +92,42 @@ export default function Compliance() {
         </CardContent></Card>
       </div>
 
-      {/* Actions */}
-      <div className="flex items-center gap-2">
+      {/* Filters Row */}
+      <div className="flex flex-wrap items-center gap-2">
+        <Select value={eventTypeFilter} onValueChange={setEventTypeFilter}>
+          <SelectTrigger className="w-44 h-9 text-sm" data-testid="select-event-type">
+            <SelectValue placeholder="Event Type" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All Events</SelectItem>
+            {EVENT_TYPES.map(t => (
+              <SelectItem key={t} value={t}>{t.replace(/_/g, " ")}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+
+        <div className="relative flex-1 min-w-40 max-w-xs">
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
+          <Input
+            data-testid="input-ticker-search"
+            placeholder="Search by ticker..."
+            className="pl-8 h-9 text-sm"
+            value={tickerSearch}
+            onChange={e => setTickerSearch(e.target.value)}
+          />
+        </div>
+
         <Button
           variant="outline"
           size="sm"
           className="text-xs"
           data-testid="button-export-csv"
-          onClick={() => logs && downloadCSV(logs)}
+          onClick={() => filteredLogs && downloadCSV(filteredLogs)}
         >
           <Download className="w-3.5 h-3.5 mr-1.5" />
           Export CSV (1099)
         </Button>
-        <div className="text-xs text-muted-foreground mono ml-auto">{(logs || []).length} audit entries</div>
+        <div className="text-xs text-muted-foreground mono ml-auto">{filteredLogs.length} of {(logs || []).length} entries</div>
       </div>
 
       {/* Wash Trade Alert */}
@@ -101,6 +142,9 @@ export default function Compliance() {
       <Card>
         <CardHeader className="p-4 pb-2 flex flex-row items-center justify-between gap-1">
           <CardTitle className="text-sm font-medium">Audit Log</CardTitle>
+          {(eventTypeFilter !== "all" || tickerSearch) && (
+            <Badge variant="secondary" className="text-xs">Filtered</Badge>
+          )}
         </CardHeader>
         <CardContent className="p-0">
           <div className="overflow-x-auto">
@@ -122,7 +166,7 @@ export default function Compliance() {
                       <td colSpan={6} className="px-4 py-2"><Skeleton className="h-4" /></td>
                     </tr>
                   ))
-                  : (logs || []).map(log => (
+                  : filteredLogs.map(log => (
                     <tr key={log.id} data-testid={`audit-row-${log.id}`} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
                       <td className="px-4 py-2 mono text-muted-foreground whitespace-nowrap">
                         {format(parseISO(log.createdAt), "MM/dd HH:mm")}
@@ -139,6 +183,13 @@ export default function Compliance() {
                     </tr>
                   ))
                 }
+                {!isLoading && filteredLogs.length === 0 && (
+                  <tr>
+                    <td colSpan={6} className="px-4 py-10 text-center text-muted-foreground">
+                      No audit entries match your filters.
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>

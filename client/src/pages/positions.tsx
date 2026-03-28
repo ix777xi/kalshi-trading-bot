@@ -6,6 +6,8 @@ import { Button } from "@/components/ui/button";
 import { format, parseISO } from "date-fns";
 import { Zap, Database, DollarSign } from "lucide-react";
 import { useState } from "react";
+import { useLocation } from "wouter";
+import { useToast } from "@/hooks/use-toast";
 import {
   PieChart, Pie, Cell, Tooltip, ResponsiveContainer, Legend
 } from "recharts";
@@ -41,6 +43,8 @@ const CATEGORY_COLORS: Record<string, string> = {
 
 export default function Positions() {
   const [mode, setMode] = useState<"demo" | "live">("demo");
+  const [, navigate] = useLocation();
+  const { toast } = useToast();
 
   const { data: settingsData } = useQuery<Settings>({
     queryKey: ["/api/settings"],
@@ -89,6 +93,14 @@ export default function Positions() {
   const liveBalanceDollars = liveBalance !== undefined ? (liveBalance / 100).toFixed(2) : null;
   const livePortfolioValue = liveBalanceData?.portfolio_value;
   const liveTotalExposure = livePositionsList.reduce((sum, p) => sum + Math.abs(p.market_exposure || 0), 0);
+
+  const handleClosePosition = (ticker: string) => {
+    toast({
+      title: "Navigate to Markets",
+      description: `Navigate to Markets to close your ${ticker} position.`,
+    });
+    navigate("/markets");
+  };
 
   return (
     <div className="p-4 space-y-4">
@@ -158,7 +170,7 @@ export default function Positions() {
             <Card><CardContent className="p-4">
               <div className="text-xs text-muted-foreground">Total Exposure</div>
               <div className="text-xl font-semibold mono" data-testid="text-live-exposure">
-                {liveLoading ? <Skeleton className="h-7 w-20" /> : liveTotalExposure.toLocaleString()}
+                {livePositionsLoading ? <Skeleton className="h-7 w-20" /> : liveTotalExposure.toLocaleString()}
               </div>
             </CardContent></Card>
             <Card><CardContent className="p-4">
@@ -217,20 +229,30 @@ export default function Positions() {
                       <th className="text-right px-4 py-2.5 text-muted-foreground font-medium">Exposure</th>
                       <th className="text-right px-4 py-2.5 text-muted-foreground font-medium">Realized P&L</th>
                       <th className="text-right px-4 py-2.5 text-muted-foreground font-medium">Total Traded</th>
+                      <th className="px-4 py-2.5" />
                     </tr>
                   </thead>
                   <tbody>
                     {livePositionsLoading
                       ? Array(8).fill(0).map((_, i) => (
                         <tr key={i} className="border-b border-border/50">
-                          <td colSpan={5} className="px-4 py-2"><Skeleton className="h-4" /></td>
+                          <td colSpan={6} className="px-4 py-2"><Skeleton className="h-4" /></td>
                         </tr>
                       ))
                       : livePositionsList.map((p, idx) => {
                         const realized = p.realized_pnl !== undefined ? (p.realized_pnl / 100).toFixed(2) : "—";
+                        const ticker = p.ticker || p.market_id || "—";
                         return (
                           <tr key={p.market_id || p.ticker || idx} data-testid={`live-position-row-${idx}`} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
-                            <td className="px-4 py-2 font-medium mono">{p.ticker || p.market_id || "—"}</td>
+                            <td className="px-4 py-2 font-medium mono">
+                              <button
+                                className="text-primary hover:underline cursor-pointer text-xs mono font-medium"
+                                onClick={() => navigate("/markets")}
+                                data-testid={`link-ticker-live-${idx}`}
+                              >
+                                {ticker}
+                              </button>
+                            </td>
                             <td className="px-4 py-2 text-right mono">
                               <span className={Number(p.position) >= 0 ? "text-profit" : "text-loss"}>
                                 {p.position !== undefined ? p.position : "—"}
@@ -245,13 +267,24 @@ export default function Positions() {
                               ) : "—"}
                             </td>
                             <td className="px-4 py-2 text-right mono text-muted-foreground">{p.total_traded !== undefined ? p.total_traded : "—"}</td>
+                            <td className="px-4 py-2">
+                              <Button
+                                size="sm"
+                                variant="destructive"
+                                className="h-6 text-xs px-2"
+                                data-testid={`button-close-live-position-${idx}`}
+                                onClick={() => handleClosePosition(ticker)}
+                              >
+                                Close
+                              </Button>
+                            </td>
                           </tr>
                         );
                       })
                     }
                     {!livePositionsLoading && livePositionsList.length === 0 && (
                       <tr>
-                        <td colSpan={5} className="px-4 py-10 text-center text-muted-foreground">
+                        <td colSpan={6} className="px-4 py-10 text-center text-muted-foreground">
                           No live positions found.
                         </td>
                       </tr>
@@ -286,19 +319,26 @@ export default function Positions() {
                       <th className="text-right px-4 py-2.5 text-muted-foreground font-medium">P&L%</th>
                       <th className="text-right px-4 py-2.5 text-muted-foreground font-medium">Kelly</th>
                       <th className="text-left px-4 py-2.5 text-muted-foreground font-medium">Cat</th>
+                      <th className="px-4 py-2.5" />
                     </tr>
                   </thead>
                   <tbody>
                     {demoLoading
                       ? Array(10).fill(0).map((_, i) => (
                         <tr key={i} className="border-b border-border/50">
-                          <td colSpan={9} className="px-4 py-2"><Skeleton className="h-4" /></td>
+                          <td colSpan={10} className="px-4 py-2"><Skeleton className="h-4" /></td>
                         </tr>
                       ))
                       : demoPositionsList.map(p => (
                         <tr key={p.id} data-testid={`position-row-${p.id}`} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
                           <td className="px-4 py-2">
-                            <div className="font-medium mono">{p.ticker}</div>
+                            <button
+                              className="font-medium mono text-primary hover:underline cursor-pointer text-xs"
+                              onClick={() => navigate("/markets")}
+                              data-testid={`link-ticker-${p.id}`}
+                            >
+                              {p.ticker}
+                            </button>
                             <div className="text-muted-foreground text-xs truncate max-w-28">{p.title}</div>
                           </td>
                           <td className="px-4 py-2">
@@ -326,6 +366,17 @@ export default function Positions() {
                             >
                               {p.category}
                             </span>
+                          </td>
+                          <td className="px-4 py-2">
+                            <Button
+                              size="sm"
+                              variant="destructive"
+                              className="h-6 text-xs px-2"
+                              data-testid={`button-close-position-${p.id}`}
+                              onClick={() => handleClosePosition(p.ticker)}
+                            >
+                              Close
+                            </Button>
                           </td>
                         </tr>
                       ))

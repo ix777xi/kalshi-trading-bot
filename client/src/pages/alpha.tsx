@@ -2,10 +2,12 @@ import { useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell
 } from "recharts";
 import { ChevronDown, ChevronRight, Sparkles, CheckCircle2, Settings2, XCircle } from "lucide-react";
+import { useToast } from "@/hooks/use-toast";
 
 const CATEGORY_HEATMAP = [
   { category: "World Events", gap: 7.32, color: "#b91c1c" },
@@ -17,7 +19,7 @@ const CATEGORY_HEATMAP = [
   { category: "Finance/Macro", gap: 0.17, color: "#3b82f6" },
 ];
 
-const EDGES = [
+const EDGES_INITIAL = [
   {
     id: 1,
     name: "Favorite-Longshot Bias",
@@ -134,23 +136,33 @@ const STATUS_CONFIG = {
   "Not Configured": { color: "bg-muted-foreground/20 text-muted-foreground border-muted-foreground/30", icon: XCircle },
 };
 
-function EdgeCard({ edge }: { edge: typeof EDGES[0] }) {
+type Edge = typeof EDGES_INITIAL[0];
+
+function EdgeCard({ edge, isActive, onToggle }: { edge: Edge; isActive: boolean; onToggle: (id: number, active: boolean) => void }) {
   const [expanded, setExpanded] = useState(false);
-  const statusCfg = STATUS_CONFIG[edge.status as keyof typeof STATUS_CONFIG];
+  // Compute displayed status based on active override
+  const displayStatus = isActive
+    ? "Active"
+    : edge.status === "Active"
+    ? "Not Configured"
+    : edge.status;
+  const statusCfg = STATUS_CONFIG[displayStatus as keyof typeof STATUS_CONFIG] || STATUS_CONFIG["Not Configured"];
   const StatusIcon = statusCfg.icon;
 
   return (
     <Card
-      className="cursor-pointer hover:bg-muted/20 transition-colors"
+      className="hover:bg-muted/20 transition-colors"
       data-testid={`edge-card-${edge.id}`}
-      onClick={() => setExpanded(!expanded)}
     >
       <CardContent className="p-4">
         <div className="flex items-start gap-3">
-          <div className="flex-shrink-0 w-7 h-7 rounded-md bg-muted/60 flex items-center justify-center text-xs font-bold mono text-muted-foreground">
+          <div
+            className="flex-shrink-0 w-7 h-7 rounded-md bg-muted/60 flex items-center justify-center text-xs font-bold mono text-muted-foreground cursor-pointer"
+            onClick={() => setExpanded(!expanded)}
+          >
             {edge.id}
           </div>
-          <div className="flex-1 min-w-0">
+          <div className="flex-1 min-w-0 cursor-pointer" onClick={() => setExpanded(!expanded)}>
             <div className="flex flex-wrap items-center gap-2 mb-1">
               <span className="text-sm font-semibold text-foreground">{edge.name}</span>
               <Badge
@@ -164,13 +176,24 @@ function EdgeCard({ edge }: { edge: typeof EDGES[0] }) {
                 className={`text-[10px] px-1.5 py-0 border flex items-center gap-1 ${statusCfg.color}`}
               >
                 <StatusIcon className="w-2.5 h-2.5" />
-                {edge.status}
+                {displayStatus}
               </Badge>
             </div>
             <div className="text-xs text-muted-foreground mb-2">{edge.summary}</div>
             <div className="text-xs mono text-primary/80 font-medium">Edge magnitude: {edge.magnitude}</div>
           </div>
-          <div className="flex-shrink-0 text-muted-foreground">
+
+          {/* Activate/Deactivate toggle */}
+          <div className="flex items-center gap-2 flex-shrink-0" onClick={e => e.stopPropagation()}>
+            <span className="text-xs text-muted-foreground">{isActive ? "Active" : "Inactive"}</span>
+            <Switch
+              checked={isActive}
+              onCheckedChange={checked => onToggle(edge.id, checked)}
+              data-testid={`switch-edge-${edge.id}`}
+            />
+          </div>
+
+          <div className="flex-shrink-0 text-muted-foreground cursor-pointer" onClick={() => setExpanded(!expanded)}>
             {expanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
           </div>
         </div>
@@ -184,6 +207,26 @@ function EdgeCard({ edge }: { edge: typeof EDGES[0] }) {
             <div>
               <div className="text-muted-foreground uppercase tracking-wider text-[10px] mb-1">Data Source Required</div>
               <div className="text-foreground/70 mono">{edge.dataSource}</div>
+            </div>
+            <div>
+              <div className="text-muted-foreground uppercase tracking-wider text-[10px] mb-2">Implementation Checklist</div>
+              <div className="space-y-1.5">
+                {[
+                  { label: "Data source connected", done: isActive },
+                  { label: "Model configured", done: isActive && edge.status !== "Not Configured" },
+                  { label: "Risk parameters set", done: true },
+                  { label: "Backtested", done: edge.status === "Active" },
+                ].map(item => (
+                  <div key={item.label} className="flex items-center gap-2">
+                    {item.done ? (
+                      <CheckCircle2 className="w-3 h-3 text-profit shrink-0" />
+                    ) : (
+                      <XCircle className="w-3 h-3 text-muted-foreground/40 shrink-0" />
+                    )}
+                    <span className={item.done ? "text-foreground/70" : "text-muted-foreground/50"}>{item.label}</span>
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
         )}
@@ -204,14 +247,37 @@ const CustomBarTooltip = ({ active, payload }: any) => {
 
 export default function Alpha() {
   const [statusFilter, setStatusFilter] = useState<string>("all");
+  const { toast } = useToast();
 
-  const activeCount = EDGES.filter(e => e.status === "Active").length;
-  const configuredCount = EDGES.filter(e => e.status === "Configured").length;
-  const totalCount = EDGES.length;
+  // Active state stored in React state (no localStorage due to iframe sandbox)
+  const [activeEdges, setActiveEdges] = useState<Record<number, boolean>>(() => {
+    const initial: Record<number, boolean> = {};
+    EDGES_INITIAL.forEach(e => {
+      initial[e.id] = e.status === "Active";
+    });
+    return initial;
+  });
+
+  const handleToggle = (id: number, active: boolean) => {
+    setActiveEdges(prev => ({ ...prev, [id]: active }));
+    const edge = EDGES_INITIAL.find(e => e.id === id);
+    toast({
+      title: active ? "Edge activated" : "Edge deactivated",
+      description: `${edge?.name || `Edge ${id}`} is now ${active ? "active" : "inactive"}.`,
+    });
+  };
+
+  const activeCount = Object.values(activeEdges).filter(Boolean).length;
+  const configuredCount = EDGES_INITIAL.filter(e => e.status === "Configured").length;
+  const totalCount = EDGES_INITIAL.length;
 
   const filtered = statusFilter === "all"
-    ? EDGES
-    : EDGES.filter(e => e.status === statusFilter);
+    ? EDGES_INITIAL
+    : statusFilter === "Active"
+    ? EDGES_INITIAL.filter(e => activeEdges[e.id])
+    : statusFilter === "Not Active"
+    ? EDGES_INITIAL.filter(e => !activeEdges[e.id])
+    : EDGES_INITIAL.filter(e => e.status === statusFilter);
 
   return (
     <div className="p-4 space-y-4">
@@ -289,7 +355,7 @@ export default function Alpha() {
       {/* Edge Filter */}
       <div className="flex items-center gap-2">
         <span className="text-xs text-muted-foreground">Filter:</span>
-        {["all", "Active", "Configured", "Not Configured"].map(f => (
+        {["all", "Active", "Not Active", "Configured", "Not Configured"].map(f => (
           <Button
             key={f}
             variant={statusFilter === f ? "default" : "ghost"}
@@ -306,7 +372,12 @@ export default function Alpha() {
       {/* Edge Cards */}
       <div className="space-y-2">
         {filtered.map((edge) => (
-          <EdgeCard key={edge.id} edge={edge} />
+          <EdgeCard
+            key={edge.id}
+            edge={edge}
+            isActive={activeEdges[edge.id] ?? false}
+            onToggle={handleToggle}
+          />
         ))}
       </div>
     </div>

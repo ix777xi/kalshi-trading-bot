@@ -479,9 +479,15 @@ export async function registerRoutes(
 
   app.put("/api/settings", async (req, res) => {
     const body = req.body;
-    // Only update private key if it was actually sent (non-empty)
-    if (body.kalshiPrivateKey === undefined || body.kalshiPrivateKey === "••••••••") {
-      delete body.kalshiPrivateKey;
+    // Handle clear private key request
+    if (body.clearPrivateKey === true) {
+      body.kalshiPrivateKey = "";
+      delete body.clearPrivateKey;
+    } else {
+      // Only update private key if it was actually sent (non-empty)
+      if (body.kalshiPrivateKey === undefined || body.kalshiPrivateKey === "••••••••") {
+        delete body.kalshiPrivateKey;
+      }
     }
     const updated = await storage.updateSettings(body);
     // Return masked version
