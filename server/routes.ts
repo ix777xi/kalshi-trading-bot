@@ -1656,17 +1656,39 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Signal action is NO_TRADE" });
       }
 
-      const side = signal.side;
+      // Extreme price guard: reject contracts priced above 95¢ or below 5¢
+      if (signal.kalshiPrice >= 0.95 || signal.kalshiPrice <= 0.05) {
+        return res.status(400).json({ error: `Price ${(signal.kalshiPrice * 100).toFixed(0)}¢ is too extreme — no profit potential. Skipping.` });
+      }
+
+      // Side is "yes" or "no" from the signal
+      const side = signal.side; // "yes" | "no"
       const action = signal.action.startsWith("SELL") ? "sell" : "buy";
-      const priceCents = Math.round(signal.kalshiPrice * 100);
-      const contracts = Math.max(1, Math.floor(signal.positionSizeUsd / signal.kalshiPrice));
+
+      // Price handling: kalshiPrice is the YES midprice
+      // For BUY_YES: use yes_price = kalshiPrice in cents
+      // For BUY_NO: the order uses no_price, autoExecuteTrade handles this via side param
+      const priceCents = side === "yes"
+        ? Math.round(signal.kalshiPrice * 100)
+        : Math.round((1 - signal.kalshiPrice) * 100);
+
+      // Validate price is in valid range (1-99 cents)
+      if (priceCents < 1 || priceCents > 99) {
+        return res.status(400).json({ error: `Computed price ${priceCents}¢ is out of valid range (1-99)` });
+      }
+
+      // Calculate contracts from position size
+      const contractPrice = side === "yes" ? signal.kalshiPrice : (1 - signal.kalshiPrice);
+      const contracts = Math.max(1, Math.floor(signal.positionSizeUsd / Math.max(contractPrice, 0.01)));
+
+      console.log(`[Sports Agent] Executing: ${action} ${side} ${contracts}x ${signal.ticker} @ ${priceCents}¢ | Edge: ${signal.edge.toFixed(1)}%`);
 
       const execResult = await autoExecuteTrade(signal.ticker, side, action, contracts, priceCents);
       if (execResult.ok) {
         await storage.createAuditLog({
           eventType: "SPORTS_AGENT_TRADE",
           ticker: signal.ticker,
-          description: `Sports Agent executed: ${signal.action} ${signal.ticker} (${signal.sport}) — ${signal.event}. Edge: ${signal.edge.toFixed(1)}%`,
+          description: `Sports Agent executed: ${action.toUpperCase()} ${side.toUpperCase()} ${contracts}x ${signal.ticker} @ ${priceCents}¢ (${signal.sport}) — ${signal.event}. Edge: ${signal.edge.toFixed(1)}%`,
           amount: signal.positionSizeUsd,
           status: "success",
           createdAt: new Date().toISOString(),
@@ -1703,19 +1725,31 @@ export async function registerRoutes(
           if (sig.action === "NO_TRADE" || sig.positionSizeUsd <= 0) continue;
           if (sig.edge < (getDefaultSports().find(s => s.id === sig.sport)?.edgeThreshold ?? 5)) continue;
 
-          const side = sig.side;
+          // Extreme price guard: skip contracts priced above 95¢ or below 5¢
+          if (sig.kalshiPrice >= 0.95 || sig.kalshiPrice <= 0.05) {
+            console.log(`[Sports Agent] Skipping ${sig.ticker}: price ${(sig.kalshiPrice * 100).toFixed(0)}¢ too extreme`);
+            continue;
+          }
+
+          const side = sig.side; // "yes" | "no"
           const action = sig.action.startsWith("SELL") ? "sell" : "buy";
-          const priceCents = Math.round(sig.kalshiPrice * 100);
-          const contracts = Math.max(1, Math.floor(sig.positionSizeUsd / sig.kalshiPrice));
+          // Price handling: kalshiPrice is YES mid. For NO side, compute NO price.
+          const priceCents = side === "yes"
+            ? Math.round(sig.kalshiPrice * 100)
+            : Math.round((1 - sig.kalshiPrice) * 100);
+          if (priceCents < 1 || priceCents > 99) continue;
+
+          const contractPrice = side === "yes" ? sig.kalshiPrice : (1 - sig.kalshiPrice);
+          const contracts = Math.max(1, Math.floor(sig.positionSizeUsd / Math.max(contractPrice, 0.01)));
 
           try {
             const execResult = await autoExecuteTrade(sig.ticker, side, action, contracts, priceCents);
             if (execResult.ok) {
-              console.log(`[Sports Agent] Auto-executed: ${sig.action} ${sig.ticker} (${sig.sport})`);
+              console.log(`[Sports Agent] Auto-executed: ${action} ${side} ${contracts}x ${sig.ticker} @ ${priceCents}¢ (${sig.sport})`);
               await storage.createAuditLog({
                 eventType: "SPORTS_AGENT_AUTO",
                 ticker: sig.ticker,
-                description: `Sports Agent auto-executed: ${sig.action} ${sig.ticker} (${sig.sport}) — ${sig.event}. Edge: ${sig.edge.toFixed(1)}%`,
+                description: `Sports Agent auto: ${action.toUpperCase()} ${side.toUpperCase()} ${contracts}x ${sig.ticker} @ ${priceCents}¢ (${sig.sport}) — ${sig.event}. Edge: ${sig.edge.toFixed(1)}%`,
                 amount: sig.positionSizeUsd,
                 status: "success",
                 createdAt: new Date().toISOString(),

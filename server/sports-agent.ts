@@ -462,6 +462,10 @@ async function scanSport(sport: SportConfig): Promise<SportsSignal[]> {
     const midPrice = yesBid > 0 && yesAsk > 0 ? (yesBid + yesAsk) / 2 : yesBid || yesAsk;
     if (midPrice <= 0 || midPrice >= 1) continue;
 
+    // Extreme price filter: skip contracts priced above 95¢ or below 5¢
+    // These have no profit potential and Kalshi often rejects orders at these levels
+    if (midPrice >= 0.95 || midPrice <= 0.05) continue;
+
     // Try to match to an ESPN event for enrichment
     const matchedEvent = espnEvents.find(e => {
       const lowerTitle = title.toLowerCase();
