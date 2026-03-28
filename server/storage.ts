@@ -1,0 +1,131 @@
+import {
+  type User, type InsertUser, users,
+  type Position, type InsertPosition, positions,
+  type Order, type InsertOrder, orders,
+  type Signal, type InsertSignal, signals,
+  type Agent, type InsertAgent, agents,
+  type Portfolio, portfolio,
+  type PnlHistory, pnlHistory,
+  type RiskConfig, type InsertRiskConfig, riskConfig,
+  type AuditLog, type InsertAuditLog, auditLog,
+  type BacktestResult, backtestResults,
+  type EquityCurve, equityCurve,
+  type Settings, type InsertSettings, settings,
+} from "@shared/schema";
+import { drizzle } from "drizzle-orm/better-sqlite3";
+import { sqlite } from "./db";
+import { eq, desc } from "drizzle-orm";
+
+export { sqlite };
+export const db = drizzle(sqlite);
+
+export interface IStorage {
+  getUser(id: number): Promise<User | undefined>;
+  getUserByUsername(username: string): Promise<User | undefined>;
+  createUser(user: InsertUser): Promise<User>;
+  getPortfolio(): Promise<Portfolio | undefined>;
+  updateBotStatus(status: string): Promise<void>;
+  getPnlHistory(): Promise<PnlHistory[]>;
+  getPositions(): Promise<Position[]>;
+  createPosition(pos: InsertPosition): Promise<Position>;
+  getOrders(): Promise<Order[]>;
+  createOrder(order: InsertOrder): Promise<Order>;
+  cancelOrder(id: number): Promise<void>;
+  getSignals(): Promise<Signal[]>;
+  createSignal(signal: InsertSignal): Promise<Signal>;
+  getAgents(): Promise<Agent[]>;
+  getRiskConfig(): Promise<RiskConfig | undefined>;
+  updateRiskConfig(config: Partial<InsertRiskConfig>): Promise<RiskConfig>;
+  getAuditLog(): Promise<AuditLog[]>;
+  createAuditLog(entry: InsertAuditLog): Promise<AuditLog>;
+  getBacktestResults(): Promise<BacktestResult[]>;
+  getEquityCurve(backtestId: number): Promise<EquityCurve[]>;
+  getSettings(): Promise<Settings | undefined>;
+  updateSettings(s: Partial<InsertSettings>): Promise<Settings>;
+}
+
+export class DatabaseStorage implements IStorage {
+  async getUser(id: number): Promise<User | undefined> {
+    return db.select().from(users).where(eq(users.id, id)).get();
+  }
+  async getUserByUsername(username: string): Promise<User | undefined> {
+    return db.select().from(users).where(eq(users.username, username)).get();
+  }
+  async createUser(insertUser: InsertUser): Promise<User> {
+    return db.insert(users).values(insertUser).returning().get();
+  }
+  async getPortfolio(): Promise<Portfolio | undefined> {
+    return db.select().from(portfolio).get();
+  }
+  async updateBotStatus(status: string): Promise<void> {
+    db.update(portfolio).set({ botStatus: status, updatedAt: new Date().toISOString() }).run();
+  }
+  async getPnlHistory(): Promise<PnlHistory[]> {
+    return db.select().from(pnlHistory).all();
+  }
+  async getPositions(): Promise<Position[]> {
+    return db.select().from(positions).all();
+  }
+  async createPosition(pos: InsertPosition): Promise<Position> {
+    return db.insert(positions).values(pos).returning().get();
+  }
+  async getOrders(): Promise<Order[]> {
+    return db.select().from(orders).orderBy(desc(orders.createdAt)).all();
+  }
+  async createOrder(order: InsertOrder): Promise<Order> {
+    return db.insert(orders).values(order).returning().get();
+  }
+  async cancelOrder(id: number): Promise<void> {
+    const now = new Date().toISOString();
+    db.update(orders).set({ status: "cancelled", updatedAt: now }).where(eq(orders.id, id)).run();
+  }
+  async getSignals(): Promise<Signal[]> {
+    return db.select().from(signals).orderBy(desc(signals.createdAt)).all();
+  }
+  async createSignal(signal: InsertSignal): Promise<Signal> {
+    return db.insert(signals).values(signal).returning().get();
+  }
+  async getAgents(): Promise<Agent[]> {
+    return db.select().from(agents).all();
+  }
+  async getRiskConfig(): Promise<RiskConfig | undefined> {
+    return db.select().from(riskConfig).get();
+  }
+  async updateRiskConfig(config: Partial<InsertRiskConfig>): Promise<RiskConfig> {
+    const existing = db.select().from(riskConfig).get();
+    if (existing) {
+      return db.update(riskConfig)
+        .set({ ...config, updatedAt: new Date().toISOString() })
+        .where(eq(riskConfig.id, existing.id))
+        .returning().get();
+    }
+    return db.insert(riskConfig).values({ ...config as InsertRiskConfig, updatedAt: new Date().toISOString() }).returning().get();
+  }
+  async getAuditLog(): Promise<AuditLog[]> {
+    return db.select().from(auditLog).orderBy(desc(auditLog.createdAt)).all();
+  }
+  async createAuditLog(entry: InsertAuditLog): Promise<AuditLog> {
+    return db.insert(auditLog).values(entry).returning().get();
+  }
+  async getBacktestResults(): Promise<BacktestResult[]> {
+    return db.select().from(backtestResults).orderBy(desc(backtestResults.createdAt)).all();
+  }
+  async getEquityCurve(bId: number): Promise<EquityCurve[]> {
+    return db.select().from(equityCurve).where(eq(equityCurve.backtestId, bId)).all();
+  }
+  async getSettings(): Promise<Settings | undefined> {
+    return db.select().from(settings).get();
+  }
+  async updateSettings(s: Partial<InsertSettings>): Promise<Settings> {
+    const existing = db.select().from(settings).get();
+    if (existing) {
+      return db.update(settings)
+        .set({ ...s, updatedAt: new Date().toISOString() })
+        .where(eq(settings.id, existing.id))
+        .returning().get();
+    }
+    return db.insert(settings).values({ ...s as InsertSettings, updatedAt: new Date().toISOString() }).returning().get();
+  }
+}
+
+export const storage = new DatabaseStorage();
