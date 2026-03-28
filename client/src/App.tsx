@@ -81,23 +81,23 @@ function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
-        <SidebarProvider style={sidebarStyle as React.CSSProperties}>
-          <div className="flex h-screen w-full bg-background overflow-hidden">
-            <AppSidebar />
-            <div className="flex flex-col flex-1 min-w-0">
-              <header className="flex items-center gap-2 h-11 px-4 border-b border-border bg-card/50 shrink-0">
-                <SidebarTrigger data-testid="button-sidebar-toggle" className="h-7 w-7" />
-                <div className="flex-1" />
-                <LiveDemoBadge />
-              </header>
-              <main className="flex-1 overflow-y-auto overscroll-contain">
-                <Router hook={useHashLocation}>
+        <Router hook={useHashLocation}>
+          <SidebarProvider style={sidebarStyle as React.CSSProperties}>
+            <div className="flex h-screen w-full bg-background overflow-hidden">
+              <AppSidebar />
+              <div className="flex flex-col flex-1 min-w-0">
+                <header className="flex items-center gap-2 h-11 px-4 border-b border-border bg-card/50 shrink-0">
+                  <SidebarTrigger data-testid="button-sidebar-toggle" className="h-7 w-7" />
+                  <div className="flex-1" />
+                  <LiveDemoBadge />
+                </header>
+                <main className="flex-1 overflow-y-auto overscroll-contain">
                   <AppRouter />
-                </Router>
-              </main>
+                </main>
+              </div>
             </div>
-          </div>
-        </SidebarProvider>
+          </SidebarProvider>
+        </Router>
         <Toaster />
       </TooltipProvider>
     </QueryClientProvider>
