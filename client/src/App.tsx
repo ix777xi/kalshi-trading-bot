@@ -15,6 +15,7 @@ import Backtest from "@/pages/backtest";
 import Compliance from "@/pages/compliance";
 import SettingsPage from "@/pages/settings";
 import Alpha from "@/pages/alpha";
+import HumanInTheLoop from "@/pages/hitl";
 import { SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/app-sidebar";
 import { useEffect } from "react";
@@ -32,6 +33,7 @@ function AppRouter() {
       <Route path="/positions" component={Positions} />
       <Route path="/risk" component={Risk} />
       <Route path="/alpha" component={Alpha} />
+      <Route path="/hitl" component={HumanInTheLoop} />
       <Route path="/backtest" component={Backtest} />
       <Route path="/compliance" component={Compliance} />
       <Route path="/settings" component={SettingsPage} />

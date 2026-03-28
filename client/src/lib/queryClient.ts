@@ -1,6 +1,7 @@
 import { QueryClient, QueryFunction } from "@tanstack/react-query";
 
-const API_BASE = "__PORT_5000__".startsWith("__") ? "" : "__PORT_5000__";
+// On Railway/self-hosted, API is served from the same origin. Empty string = relative paths.
+const API_BASE = "";
 
 async function throwIfResNotOk(res: Response) {
   if (!res.ok) {
