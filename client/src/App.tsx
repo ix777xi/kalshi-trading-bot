@@ -17,6 +17,7 @@ import SettingsPage from "@/pages/settings";
 import Alpha from "@/pages/alpha";
 import HumanInTheLoop from "@/pages/hitl";
 import AutonomousPage from "@/pages/autonomous";
+import TodaysPicks from "@/pages/picks";
 import { SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/app-sidebar";
 import { useEffect } from "react";
@@ -59,6 +60,7 @@ function AppRouter() {
       <Route path="/risk" component={Risk} />
       <Route path="/alpha" component={Alpha} />
       <Route path="/hitl" component={HumanInTheLoop} />
+      <Route path="/picks" component={TodaysPicks} />
       <Route path="/autonomous" component={AutonomousPage} />
       <Route path="/backtest" component={Backtest} />
       <Route path="/compliance" component={Compliance} />
