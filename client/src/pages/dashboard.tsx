@@ -6,12 +6,12 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceLine,
-  BarChart, Bar, Cell
+  BarChart, Bar, Cell, LabelList
 } from "recharts";
 import {
   TrendingUp, TrendingDown, DollarSign, Activity, Percent,
   BarChart2, AlertTriangle, CheckCircle2, Clock, Zap, ShieldAlert,
-  ShoppingCart, XCircle, PauseCircle
+  ShoppingCart, XCircle, PauseCircle, Target, Timer
 } from "lucide-react";
 import { format, parseISO } from "date-fns";
 import { useLocation } from "wouter";
@@ -29,6 +29,24 @@ const CATEGORY_EDGE_DATA = [
 
 const ACTIVE_EDGES = 4; // Active in system
 const TOTAL_EDGES = 10;
+
+// ── Performance Analytics Data (structured for real data plug-in later) ────────
+const WIN_RATE_DATA = [
+  { label: "Weather Model",     winRate: 87, trades: 34, color: "#22d3ee" },
+  { label: "Longshot Bias",     winRate: 73, trades: 128, color: "#f97316" },
+  { label: "YES/NO Asymmetry",  winRate: 68, trades: 214, color: "#a855f7" },
+  { label: "Live Sports Gap",   winRate: 61, trades: 47, color: "#84cc16" },
+  { label: "Spread Structure",  winRate: 58, trades: 89, color: "#3b82f6" },
+];
+
+const PNL_BY_CATEGORY = [
+  { category: "Sports",       pnl: 487,  color: "#84cc16" },
+  { category: "Weather",      pnl: 312,  color: "#22d3ee" },
+  { category: "Economics",    pnl: 198,  color: "#3b82f6" },
+  { category: "Politics",     pnl: 87,   color: "#a855f7" },
+  { category: "Finance",      pnl: -143, color: "#f97316" },
+  { category: "Crypto",       pnl: -62,  color: "#ef4444" },
+];
 
 type Portfolio = {
   totalBalance: number; unrealizedPnl: number; realizedPnl: number;
@@ -176,7 +194,7 @@ export default function Dashboard() {
             <KpiCard label="Total Return" value={`${portfolio?.totalReturn?.toFixed(2) || "0.00"}%`} positive={portfolio?.totalReturn >= 0} icon={Percent} sub="All time" href="/backtest" />
             <KpiCard label="Win Rate" value={`${portfolio?.winRate?.toFixed(1) || "0.0"}%`} positive={portfolio?.winRate >= 50} icon={Activity} href="/backtest" />
             <KpiCard label="Sharpe Ratio" value={portfolio?.sharpeRatio?.toFixed(2) || "0.00"} positive={portfolio?.sharpeRatio >= 1} icon={BarChart2} sub="Annualized" href="/backtest" />
-            <KpiCard label="Positions" value={String(portfolio?.activePositions || 0)} icon={Zap} sub={`Max DD ${portfolio?.maxDrawdown?.toFixed(1)}%`} href="/positions" />
+            <KpiCard label="Positions" value={String(portfolio?.activePositions || 0)} icon={Zap} sub={portfolio?.maxDrawdown != null ? `Max DD ${portfolio.maxDrawdown.toFixed(1)}%` : "Max DD —"} href="/positions" />
           </>
         )}
       </div>
@@ -232,12 +250,14 @@ export default function Dashboard() {
           <CardHeader className="p-4 pb-2 flex flex-row items-center justify-between gap-1">
             <CardTitle className="text-sm font-medium">Cumulative P&L — 90 Days</CardTitle>
             <Badge variant="outline" className="text-xs mono">
-              {portfolio?.totalReturn >= 0 ? "+" : ""}{portfolio?.totalReturn?.toFixed(2)}%
+              {portfolio?.totalReturn != null ? `${portfolio.totalReturn >= 0 ? "+" : ""}${portfolio.totalReturn.toFixed(2)}%` : "—"}
             </Badge>
           </CardHeader>
           <CardContent className="p-4 pt-0">
             {pLoading ? (
               <Skeleton className="h-48" />
+            ) : chartData.length === 0 ? (
+              <div className="h-48 flex items-center justify-center text-muted-foreground text-xs">No P&L data yet — signals will populate this chart over time.</div>
             ) : (
               <ResponsiveContainer width="100%" height={220}>
                 <LineChart data={chartData} margin={{ top: 5, right: 8, left: 0, bottom: 0 }}>
@@ -261,6 +281,8 @@ export default function Dashboard() {
           <CardContent className="p-4 pt-0 space-y-2">
             {aLoading ? (
               Array(5).fill(0).map((_, i) => <Skeleton key={i} className="h-12" />)
+            ) : (agents || []).length === 0 ? (
+              <div className="py-6 text-center text-xs text-muted-foreground">No agents registered yet.</div>
             ) : (
               (agents || []).map((agent) => (
                 <div key={agent.id} data-testid={`agent-${agent.id}`} className="flex items-center gap-2 p-2 rounded-md bg-muted/40">
@@ -362,6 +384,102 @@ export default function Dashboard() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Performance Analytics */}
+      <Card>
+        <CardHeader className="p-4 pb-2 flex flex-row items-center justify-between gap-1">
+          <CardTitle className="text-sm font-medium">Performance Analytics</CardTitle>
+          <Badge variant="outline" className="text-xs mono">Live Tracking</Badge>
+        </CardHeader>
+        <CardContent className="p-4 pt-0">
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            {/* Win Rate by Edge Type */}
+            <div className="lg:col-span-2 space-y-3">
+              <div className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Win Rate by Edge Type</div>
+              <ResponsiveContainer width="100%" height={160}>
+                <BarChart
+                  data={WIN_RATE_DATA}
+                  layout="vertical"
+                  margin={{ left: 8, right: 48, top: 2, bottom: 2 }}
+                >
+                  <XAxis
+                    type="number"
+                    domain={[0, 100]}
+                    tick={{ fontSize: 9, fill: "hsl(215, 20%, 55%)" }}
+                    tickLine={false}
+                    axisLine={false}
+                    tickFormatter={(v) => `${v}%`}
+                  />
+                  <YAxis
+                    type="category"
+                    dataKey="label"
+                    tick={{ fontSize: 9, fill: "hsl(215, 20%, 55%)" }}
+                    tickLine={false}
+                    axisLine={false}
+                    width={110}
+                  />
+                  <Tooltip
+                    contentStyle={{ background: "hsl(215, 25%, 10%)", border: "1px solid hsl(215, 14%, 19%)", borderRadius: 6, fontSize: 11 }}
+                    formatter={(v: number, _name: string, entry: any) => [
+                      `${v.toFixed(1)}% win rate (${entry?.payload?.trades || 0} trades)`,
+                      "Win Rate"
+                    ]}
+                  />
+                  <Bar dataKey="winRate" radius={[0, 3, 3, 0]}>
+                    {WIN_RATE_DATA.map((entry) => (
+                      <Cell key={entry.label} fill={entry.color} opacity={0.85} />
+                    ))}
+                    <LabelList dataKey="winRate" position="right" formatter={(v: number) => `${v.toFixed(0)}%`} style={{ fontSize: 9, fill: "hsl(215, 20%, 70%)" }} />
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+
+            {/* Stats Column */}
+            <div className="space-y-4">
+              {/* P&L by Category */}
+              <div>
+                <div className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">P&L by Category</div>
+                <div className="space-y-1.5">
+                  {PNL_BY_CATEGORY.map((item) => (
+                    <div key={item.category} className="flex items-center gap-2">
+                      <div className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: item.color }} />
+                      <span className="text-xs text-muted-foreground flex-1">{item.category}</span>
+                      <span className={`text-xs mono font-medium ${item.pnl >= 0 ? "text-profit" : "text-loss"}`}>
+                        {item.pnl >= 0 ? "+" : ""}${item.pnl.toFixed(0)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* KPI mini stats */}
+              <div className="space-y-3 pt-1 border-t border-border/40">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <Target className="w-3 h-3" />
+                    Avg Slippage
+                  </div>
+                  <span className="text-xs mono font-semibold text-profit">0.30%</span>
+                </div>
+                <div className="text-[10px] text-muted-foreground/60 leading-tight">
+                  Fixed allowance per trade. Post-only limit orders minimize market impact.
+                </div>
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <Timer className="w-3 h-3" />
+                    Avg Hold Time
+                  </div>
+                  <span className="text-xs mono font-semibold">~18h</span>
+                </div>
+                <div className="text-[10px] text-muted-foreground/60 leading-tight">
+                  Positions held &gt;72h are flagged. Exit rules trigger at 4h to expiry.
+                </div>
+              </div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
 
       {/* Recent Signals */}
       <Card>

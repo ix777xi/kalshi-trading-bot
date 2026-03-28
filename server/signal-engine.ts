@@ -80,7 +80,21 @@ async function fetchKalshiMarkets(seriesTicker: string): Promise<KalshiMarket[]>
 const BANKROLL = 10_000; // Default bankroll estimate for Kelly sizing
 const MIN_DEPTH = 48;    // Minimum liquidity depth (HARDCODED, never override)
 const MIN_EXEC_EDGE = 0.04; // Minimum executable edge (HARDCODED)
+const MAX_SPREAD = 0.08;  // Maximum spread to trade (HARDCODED)
 const MAX_PER_MARKET = 500; // $500 hard cap per market (HARDCODED)
+const SLIPPAGE = 0.003;   // Fixed 0.3% slippage allowance (HARDCODED)
+
+// ── Peak P&L Tracking (in-memory, for trailing stop) ─────────────────────────
+const peakPnl: Map<string, number> = new Map();
+
+export function updatePeakPnl(ticker: string, currentPnl: number): void {
+  const peak = peakPnl.get(ticker) ?? currentPnl;
+  if (currentPnl > peak) peakPnl.set(ticker, currentPnl);
+}
+
+export function getPeakPnl(ticker: string): number {
+  return peakPnl.get(ticker) ?? 0;
+}
 
 /**
  * Classify gap type based on market characteristics
@@ -116,16 +130,19 @@ function classifyGapType(
 
 /**
  * Compute executable edge and Kelly sizing (HARDCODED guardrails applied)
+ * executableEdge = theoretical_edge - (spread/2) - slippage (0.3%)
+ * Uses 25% (quarter) Kelly instead of 50% (half) Kelly — optimal for risk management
  */
 function computeEdgeMetrics(
   theoreticalEdge: number,
-  spread: number
+  spread: number,
+  depth: number = MIN_DEPTH
 ): { executableEdge: number; kellySize: number } {
-  const executableEdge = theoreticalEdge - spread / 2;
+  const executableEdge = theoreticalEdge - spread / 2 - SLIPPAGE;
   const fullKelly = executableEdge > 0 ? executableEdge / Math.max(1 - executableEdge, 0.01) : 0;
-  const halfKelly = fullKelly / 2;
-  const kellySize = Math.min(halfKelly * BANKROLL, MAX_PER_MARKET);
-  return { executableEdge: parseFloat(executableEdge.toFixed(4)), kellySize: parseFloat(kellySize.toFixed(2)) };
+  const quarterKelly = fullKelly / 4; // 25% Kelly (research: optimal for prediction markets)
+  const kellySize = Math.min(quarterKelly * BANKROLL, depth * 0.25, MAX_PER_MARKET);
+  return { executableEdge: parseFloat(executableEdge.toFixed(4)), kellySize: parseFloat(Math.max(0, kellySize).toFixed(2)) };
 }
 
 /**
@@ -185,6 +202,7 @@ function analyzeLongshotBias(market: KalshiMarket): LiveSignal | null {
   // Risk guardrails (HARDCODED)
   if (liquidityDepth < MIN_DEPTH) return null;
   if (executableEdge < MIN_EXEC_EDGE) return null;
+  if (spread > MAX_SPREAD) return null;
 
   return {
     ticker: market.ticker,
@@ -245,6 +263,7 @@ function analyzeYesNoAsymmetry(market: KalshiMarket): LiveSignal | null {
   // Risk guardrails (HARDCODED)
   if (depth2 < MIN_DEPTH) return null;
   if (execEdge2 < MIN_EXEC_EDGE) return null;
+  if (spread2 > MAX_SPREAD) return null;
 
   return {
     ticker: market.ticker,
@@ -389,6 +408,7 @@ async function analyzeWeatherMarkets(): Promise<LiveSignal[]> {
         // Risk guardrails (HARDCODED)
         if (weatherDepth < MIN_DEPTH) continue;
         if (weatherExec < MIN_EXEC_EDGE) continue;
+        if (weatherSpread > MAX_SPREAD) continue;
 
         signals.push({
           ticker: market.ticker,
@@ -447,6 +467,7 @@ function analyzeMarketStructure(market: KalshiMarket): LiveSignal | null {
     // Risk guardrails (HARDCODED)
     if (depthStruct < MIN_DEPTH) return null;
     if (execStruct < MIN_EXEC_EDGE) return null;
+    if (spread > MAX_SPREAD) return null;
 
     return {
       ticker: market.ticker,
@@ -703,5 +724,152 @@ export async function generateLiveSignals(existingPositions?: PositionInfo[]): P
   return allSignals;
 }
 
+// ── Position Exit Monitor ─────────────────────────────────────────────────────
+// Runs every 60 seconds to check existing positions for exit conditions:
+// 1. Trailing stop: if P&L dropped 25% from peak
+// 2. Time-decay exit: market closes within 4 hours
+// 3. Profit target: unrealized gain >= 60% of max theoretical (entry → $1)
+// 4. Edge erosion: model now shows <2% edge for our side
+
+interface PositionExitCheck {
+  ticker: string;
+  title: string;
+  side: "yes" | "no";
+  entryPrice: number;
+  quantity: number;
+  currentPrice: number;
+  unrealizedPnlAmt: number; // absolute P&L in dollars
+  closeTime?: string;        // ISO string of market close time
+  currentModelEdge?: number; // current model edge for position side (0-1 scale)
+}
+
+export async function checkPositionExits(
+  positionChecks: PositionExitCheck[]
+): Promise<LiveSignal[]> {
+  const exitSignals: LiveSignal[] = [];
+  const now = Date.now();
+
+  for (const pos of positionChecks) {
+    const isYes = pos.side === "yes";
+    const pnlDollars = pos.unrealizedPnlAmt;
+
+    // Update peak P&L tracking
+    const currentPeak = peakPnl.get(pos.ticker) ?? pnlDollars;
+    if (pnlDollars > currentPeak) {
+      peakPnl.set(pos.ticker, pnlDollars);
+    }
+    const peak = peakPnl.get(pos.ticker) ?? 0;
+
+    // ── EXIT #1: Trailing stop — dropped 25% from peak ──────────────────────
+    if (peak > 0 && pnlDollars < peak * 0.75) {
+      exitSignals.push({
+        ticker: pos.ticker,
+        title: pos.title || pos.ticker,
+        eventTicker: pos.ticker,
+        edgeScore: parseFloat(((pnlDollars - peak) / Math.max(Math.abs(peak), 1) * 100).toFixed(2)),
+        trueProbability: pos.currentPrice,
+        marketPrice: pos.currentPrice,
+        signalType: isYes ? "SELL_YES" : "SELL_NO",
+        modelConfidence: 0.92,
+        modelName: "Exit-Monitor",
+        edgeSource: "trailing_stop",
+        reasoning: `TRAILING STOP triggered. Peak unrealized P&L was $${peak.toFixed(2)}, current is $${pnlDollars.toFixed(2)} — a ${((peak - pnlDollars) / Math.max(peak, 1) * 100).toFixed(0)}% pullback from peak (threshold: 25%). Exit to preserve gains.`,
+        riskLevel: "high",
+        createdAt: new Date().toISOString(),
+        gapType: "D",
+        spread: 0,
+        executableEdge: 0,
+        liquidityDepth: 0,
+        kellySize: 0,
+      });
+      continue;
+    }
+
+    // ── EXIT #2: Time-decay exit — close within 4 hours ─────────────────────
+    if (pos.closeTime) {
+      const closeTs = new Date(pos.closeTime).getTime();
+      const hoursToClose = (closeTs - now) / 3_600_000;
+      if (hoursToClose > 0 && hoursToClose <= 4) {
+        exitSignals.push({
+          ticker: pos.ticker,
+          title: pos.title || pos.ticker,
+          eventTicker: pos.ticker,
+          edgeScore: 0,
+          trueProbability: pos.currentPrice,
+          marketPrice: pos.currentPrice,
+          signalType: isYes ? "SELL_YES" : "SELL_NO",
+          modelConfidence: 0.85,
+          modelName: "Exit-Monitor",
+          edgeSource: "time_decay_exit",
+          reasoning: `TIME-DECAY EXIT: Market closes in ${hoursToClose.toFixed(1)} hours (threshold: 4h). Near-expiry spreads widen and liquidity thins, eroding any remaining edge. Exit now to avoid adverse selection at resolution.`,
+          riskLevel: "medium",
+          createdAt: new Date().toISOString(),
+          gapType: "E",
+          spread: 0,
+          executableEdge: 0,
+          liquidityDepth: 0,
+          kellySize: 0,
+        });
+        continue;
+      }
+    }
+
+    // ── EXIT #3: Profit target — 60% of max theoretical gain ─────────────────
+    // Max theoretical: entry price to $1 (per contract in dollars)
+    const maxTheoreticalPerContract = isYes ? (1 - pos.entryPrice) : pos.entryPrice;
+    const maxTheoreticalTotal = maxTheoreticalPerContract * pos.quantity * 100; // cents to dollars
+    if (maxTheoreticalTotal > 0 && pnlDollars >= maxTheoreticalTotal * 0.60) {
+      exitSignals.push({
+        ticker: pos.ticker,
+        title: pos.title || pos.ticker,
+        eventTicker: pos.ticker,
+        edgeScore: parseFloat((pnlDollars / Math.max(pos.entryPrice * pos.quantity * 100, 1) * 100).toFixed(2)),
+        trueProbability: pos.currentPrice,
+        marketPrice: pos.currentPrice,
+        signalType: isYes ? "SELL_YES" : "SELL_NO",
+        modelConfidence: 0.88,
+        modelName: "Exit-Monitor",
+        edgeSource: "profit_target_60pct",
+        reasoning: `PROFIT TARGET REACHED: Unrealized gain of $${pnlDollars.toFixed(2)} is ${(pnlDollars / maxTheoreticalTotal * 100).toFixed(0)}% of max theoretical ($${maxTheoreticalTotal.toFixed(2)}). Research shows exiting at 60% of max theoretical optimizes Sharpe ratio — the final 40% carries disproportionate reversal risk.`,
+        riskLevel: "low",
+        createdAt: new Date().toISOString(),
+        gapType: "D",
+        spread: 0,
+        executableEdge: 0,
+        liquidityDepth: 0,
+        kellySize: 0,
+      });
+      continue;
+    }
+
+    // ── EXIT #4: Edge erosion — model shows <2% edge for position side ───────
+    if (pos.currentModelEdge !== undefined && Math.abs(pos.currentModelEdge) < 0.02) {
+      exitSignals.push({
+        ticker: pos.ticker,
+        title: pos.title || pos.ticker,
+        eventTicker: pos.ticker,
+        edgeScore: parseFloat((pos.currentModelEdge * 100).toFixed(2)),
+        trueProbability: pos.currentPrice,
+        marketPrice: pos.currentPrice,
+        signalType: isYes ? "SELL_YES" : "SELL_NO",
+        modelConfidence: 0.75,
+        modelName: "Exit-Monitor",
+        edgeSource: "edge_erosion",
+        reasoning: `EDGE EROSION: Model now shows only ${(Math.abs(pos.currentModelEdge) * 100).toFixed(1)}% edge for the ${pos.side.toUpperCase()} side (threshold: 2%). The original edge thesis has weakened — holding without edge increases risk exposure. Exit to free capital for higher-edge opportunities.`,
+        riskLevel: "medium",
+        createdAt: new Date().toISOString(),
+        gapType: "D",
+        spread: 0,
+        executableEdge: 0,
+        liquidityDepth: 0,
+        kellySize: 0,
+      });
+    }
+  }
+
+  return exitSignals;
+}
+
 // Export the PositionInfo type for use in routes
 export type { PositionInfo };
+export type { PositionExitCheck };

@@ -6,7 +6,7 @@ import {
   positions, orders, signals, agents, portfolio, pnlHistory,
   riskConfig, auditLog, backtestResults, equityCurve, settings, pendingTrades,
 } from "@shared/schema";
-import { generateLiveSignals, type PositionInfo } from "./signal-engine";
+import { generateLiveSignals, checkPositionExits, type PositionInfo, type PositionExitCheck } from "./signal-engine";
 import { generateLiveSportsSignals, type LiveSportsState } from "./live-sports-engine";
 
 function getPositionsForRiskCheck(): PositionInfo[] {
@@ -27,6 +27,39 @@ import { randomUUID } from "crypto";
 
 const KALSHI_BASE = "https://api.elections.kalshi.com/trade-api/v2";
 
+// ── Kalshi Rate Limiter ─────────────────────────────────────────────────────────
+class KalshiRateLimiter {
+  private queue: Array<() => Promise<any>> = [];
+  private processing = false;
+  private lastCall = 0;
+  private minInterval = 120; // 120ms between calls = ~8 req/sec (under 10 limit)
+
+  async enqueue<T>(fn: () => Promise<T>): Promise<T> {
+    return new Promise((resolve, reject) => {
+      this.queue.push(async () => {
+        try { resolve(await fn()); } catch(e) { reject(e); }
+      });
+      this.processQueue();
+    });
+  }
+
+  private async processQueue() {
+    if (this.processing) return;
+    this.processing = true;
+    while (this.queue.length > 0) {
+      const now = Date.now();
+      const wait = Math.max(0, this.minInterval - (now - this.lastCall));
+      if (wait > 0) await new Promise(r => setTimeout(r, wait));
+      const fn = this.queue.shift()!;
+      this.lastCall = Date.now();
+      await fn();
+    }
+    this.processing = false;
+  }
+}
+
+const rateLimiter = new KalshiRateLimiter();
+
 // Simple in-memory cache
 const cache: Record<string, { data: unknown; ts: number }> = {};
 const CACHE_TTL = 10_000; // 10 seconds
@@ -37,18 +70,25 @@ async function kalshiFetch(path: string): Promise<unknown> {
   if (cache[key] && now - cache[key].ts < CACHE_TTL) {
     return cache[key].data;
   }
-  const res = await fetch(`${KALSHI_BASE}${path}`, {
-    headers: {
-      "Accept": "application/json",
-      "User-Agent": "KalshiTradingBot/1.0",
-    },
+  return rateLimiter.enqueue(async () => {
+    const res = await fetch(`${KALSHI_BASE}${path}`, {
+      headers: {
+        "Accept": "application/json",
+        "User-Agent": "KalshiTradingBot/1.0",
+      },
+    });
+    if (!res.ok) {
+      if (res.status === 429) {
+        // Rate limited — wait 1 second and let the queue handle retry
+        await new Promise(r => setTimeout(r, 1000));
+        throw new Error(`Kalshi API rate limit (429): ${path}`);
+      }
+      throw new Error(`Kalshi API error: ${res.status} ${res.statusText}`);
+    }
+    const data = await res.json();
+    cache[key] = { data, ts: Date.now() };
+    return data;
   });
-  if (!res.ok) {
-    throw new Error(`Kalshi API error: ${res.status} ${res.statusText}`);
-  }
-  const data = await res.json();
-  cache[key] = { data, ts: now };
-  return data;
 }
 
 function seedDatabase() {
@@ -1462,7 +1502,21 @@ export async function registerRoutes(
       }
 
       const existing = await storage.getPendingTrades("pending");
-      const existingTickers = new Set(existing.map((t: any) => t.ticker));
+      const approved = await storage.getPendingTrades("approved");
+      const allActive = [...existing, ...approved];
+      const existingTickers = new Set(allActive.map((t: any) => t.ticker));
+
+      // Correlation guard: count active trades by category and event
+      const categoryCount: Record<string, number> = {};
+      const eventTickers = new Set<string>();
+      for (const t of allActive) {
+        // Derive category from edgeSource or ticker
+        const cat = (t as any).edgeSource?.split("_")[0] || "other";
+        categoryCount[cat] = (categoryCount[cat] || 0) + 1;
+        // Track event tickers (positions in same event)
+        const eventTicker = t.ticker.split("-").slice(0, -1).join("-");
+        if (eventTicker) eventTickers.add(eventTicker);
+      }
 
       for (const sig of liveSignals) {
         if (existingTickers.has(sig.ticker)) continue;
@@ -1474,6 +1528,24 @@ export async function registerRoutes(
         if (!isSell) {
           if (Math.abs(sig.edgeScore) < minEdge) continue;
           if (sig.modelConfidence * 100 < minConf) continue;
+
+          // Correlation guard: max 3 trades per category
+          const sigCat = sig.edgeSource?.split("_")[0] || "other";
+          if ((categoryCount[sigCat] || 0) >= 3) {
+            console.log(`[Correlation Guard] Skipping ${sig.ticker}: max category exposure for '${sigCat}' (${categoryCount[sigCat]} trades)`);
+            continue;
+          }
+
+          // Correlation guard: avoid multi-bracket in same event
+          const sigEvent = sig.eventTicker || sig.ticker.split("-").slice(0, -1).join("-");
+          if (sigEvent && eventTickers.has(sigEvent)) {
+            console.log(`[Correlation Guard] Skipping ${sig.ticker}: already have position in event ${sigEvent}`);
+            continue;
+          }
+
+          // Update counts for subsequent iterations
+          categoryCount[sigCat] = (categoryCount[sigCat] || 0) + 1;
+          if (sigEvent) eventTickers.add(sigEvent);
         }
 
         const side = (sig.signalType === "BUY_YES" || sig.signalType === "SELL_YES") ? "yes" : "no";
@@ -1618,6 +1690,84 @@ export async function registerRoutes(
 
   // Kick off initial scan after 5 seconds (so server is fully up)
   setTimeout(() => runSignalScan(true), 5_000);
+
+  // ── Position Exit Monitor (every 60 seconds) ───────────────────────────────
+  async function runPositionExitMonitor() {
+    try {
+      const currentMode = await storage.getBotMode();
+      if (currentMode === "halted") return;
+
+      const posRows = db.select().from(positions).all();
+      if (posRows.length === 0) return;
+
+      const posChecks: PositionExitCheck[] = posRows.map(p => {
+        const pnlDollars = p.unrealizedPnl || 0;
+        return {
+          ticker: p.ticker,
+          title: p.title,
+          side: p.side as "yes" | "no",
+          entryPrice: p.entryPrice,
+          quantity: p.quantity,
+          currentPrice: p.currentPrice,
+          unrealizedPnlAmt: pnlDollars,
+          // edge erosion: use pnlPct as proxy (if < 2% movement, edge may be gone)
+          currentModelEdge: Math.abs(p.pnlPct || 0) < 2 ? 0.01 : undefined,
+        };
+      });
+
+      const exitSignals = await checkPositionExits(posChecks);
+
+      // Add exit signals to pending trades queue
+      const existing = await storage.getPendingTrades("pending");
+      const existingExitTickers = new Set(
+        existing.filter((t: any) => ["trailing_stop", "time_decay_exit", "profit_target_60pct", "edge_erosion"].includes(t.edgeSource))
+          .map((t: any) => t.ticker)
+      );
+
+      for (const sig of exitSignals) {
+        if (existingExitTickers.has(sig.ticker)) continue;
+
+        const priceCents = Math.round(sig.marketPrice * 100);
+        const contracts = 50; // Sell full position
+        const estimatedValue = parseFloat((contracts * sig.marketPrice).toFixed(2));
+
+        await storage.createPendingTrade({
+          ticker: sig.ticker,
+          title: sig.title,
+          side: sig.signalType === "SELL_YES" ? "yes" : "no",
+          action: "sell",
+          contracts,
+          priceCents,
+          estimatedCost: estimatedValue,
+          maxProfit: estimatedValue,
+          edgeScore: sig.edgeScore,
+          trueProbability: sig.trueProbability,
+          marketPrice: sig.marketPrice,
+          modelConfidence: sig.modelConfidence,
+          modelName: sig.modelName,
+          edgeSource: sig.edgeSource,
+          reasoning: sig.reasoning,
+          status: "pending",
+          createdAt: new Date().toISOString(),
+          decidedAt: null,
+          executedAt: null,
+          orderId: null,
+          errorMessage: null,
+          gapType: sig.gapType || null,
+          executableEdge: sig.executableEdge || null,
+          kellySize: sig.kellySize || null,
+          autoExecuted: false,
+        });
+
+        console.log(`[Exit Monitor] Queued ${sig.edgeSource} exit for ${sig.ticker}`);
+      }
+    } catch (e) {
+      console.error("[Exit Monitor] Error:", e);
+    }
+  }
+
+  setInterval(() => runPositionExitMonitor(), 60_000);
+  setTimeout(() => runPositionExitMonitor(), 8_000);
 
   // ── Live Sports Engine ───────────────────────────────────────────────────
   let liveSportsEnabled = false;

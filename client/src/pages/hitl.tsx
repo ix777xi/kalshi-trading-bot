@@ -68,6 +68,16 @@ function getEdgeSourceInfo(edgeSource: string): { label: string; color: string; 
       return { label: "Liquidity Risk", color: "bg-yellow-500/20 text-yellow-400 border-yellow-500/30", icon: AlertTriangle };
     case "drawdown_warning":
       return { label: "Drawdown Warning", color: "bg-orange-500/20 text-orange-400 border-orange-500/30", icon: TrendingDown };
+    case "trailing_stop":
+      return { label: "Trailing Stop", color: "bg-red-500/20 text-red-400 border-red-500/30", icon: ShieldAlert };
+    case "time_decay_exit":
+      return { label: "Time-Decay Exit", color: "bg-amber-500/20 text-amber-400 border-amber-500/30", icon: Clock };
+    case "profit_target_60pct":
+      return { label: "Profit Target 60%", color: "bg-green-500/20 text-green-400 border-green-500/30", icon: TrendingUp };
+    case "edge_erosion":
+      return { label: "Edge Erosion", color: "bg-orange-500/20 text-orange-400 border-orange-500/30", icon: Activity };
+    case "live_sports_gap":
+      return { label: "Live Sports Gap", color: "bg-lime-500/20 text-lime-400 border-lime-500/30", icon: BarChart3 };
     default:
       return { label: edgeSource, color: "bg-gray-500/20 text-gray-400 border-gray-500/30", icon: BarChart3 };
   }
@@ -465,6 +475,7 @@ function PendingTradeCard({ trade, hasPrivateKey }: { trade: PendingTrade; hasPr
 
 function DecidedTradeRow({ trade }: { trade: PendingTrade }) {
   const isYes = trade.side === "yes";
+  const isSell = trade.action === "sell";
   const edgeSourceInfo = getEdgeSourceInfo(trade.edgeSource);
 
   return (
