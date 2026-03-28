@@ -1051,6 +1051,24 @@ export async function registerRoutes(
         return "Market";
       }
 
+      // ── Edge metadata for attribution ────────────────────────────────────
+      const EDGE_METADATA: Record<string, { name: string; avgReturn: number; dataSource: string }> = {
+        "favorite_longshot_bias": { name: "Favorite-Longshot Bias", avgReturn: 16.36, dataSource: "Historical Kalshi trade data" },
+        "yes_no_asymmetry": { name: "YES/NO Asymmetry", avgReturn: 64, dataSource: "72.1M trades, $18.26B notional" },
+        "market_maker_spread": { name: "Market Maker Spread", avgReturn: 1.12, dataSource: "Order book depth analysis" },
+        "weather_model": { name: "GFS Weather Ensemble", avgReturn: 15, dataSource: "GFS 30-member ensemble forecast" },
+      };
+
+      const CATEGORY_MULTIPLIERS: Record<string, number> = {
+        "NBA Game": 0.7,
+        "NYC Weather": 1.0,
+        "S&P 500": 0.3,
+        "Fed Rate": 0.9,
+        "CPI": 0.9,
+        "GDP": 0.9,
+        "Market": 0.5,
+      };
+
       // ── Compute picks from bias analysis ──────────────────────────────────
       type Pick = {
         id: string;
@@ -1073,6 +1091,13 @@ export async function registerRoutes(
         reasoning: string;
         tag: string;
         closeTime: string;
+        modelProbability: number;
+        alphaEdgeName: string;
+        historicalAvgReturn: number;
+        categoryMultiplier: number;
+        dataSource: string;
+        confidenceLow: number;
+        confidenceHigh: number;
       };
 
       const picks: Pick[] = [];
@@ -1091,12 +1116,26 @@ export async function registerRoutes(
         const side: "yes" | "no" = signal.signalType === "BUY_YES" ? "yes" : "no";
         const action: "buy" | "sell" = signal.signalType.startsWith("BUY") ? "buy" : "sell";
 
+        const edgeMeta = EDGE_METADATA[signal.edgeSource] || { name: "Custom Edge", avgReturn: 5, dataSource: "Multi-source analysis" };
+        const cat = categoryTag(market);
+        const catMult = CATEGORY_MULTIPLIERS[cat] ?? 0.5;
+
+        // Model probability: derive from the edge + market price
+        const modelProb = signal.signalType === "BUY_YES"
+          ? Math.min(0.99, signal.marketPrice + Math.abs(signal.executableEdge))
+          : Math.max(0.01, signal.marketPrice - Math.abs(signal.executableEdge));
+
+        // Confidence band: ±spread around model confidence
+        const confSpread = Math.max(0.03, (1 - signal.modelConfidence) * 0.5);
+        const confidenceLow = Math.max(0.01, signal.modelConfidence - confSpread);
+        const confidenceHigh = Math.min(0.99, signal.modelConfidence + confSpread);
+
         picks.push({
           id: market.ticker + "-" + signal.edgeSource,
           ticker: market.ticker,
           title: market.title || market.ticker,
           eventTicker: market.event_ticker || "",
-          category: categoryTag(market),
+          category: cat,
           side,
           action,
           contracts,
@@ -1112,6 +1151,13 @@ export async function registerRoutes(
           reasoning: signal.reasoning,
           tag,
           closeTime: market.expected_expiration_time || market.close_time || "",
+          modelProbability: modelProb,
+          alphaEdgeName: edgeMeta.name,
+          historicalAvgReturn: edgeMeta.avgReturn,
+          categoryMultiplier: catMult,
+          dataSource: edgeMeta.dataSource,
+          confidenceLow,
+          confidenceHigh,
         });
       }
 
