@@ -13,9 +13,14 @@ import {
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle
 } from "@/components/ui/alert-dialog";
 import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter
+} from "@/components/ui/dialog";
+import { Switch } from "@/components/ui/switch";
+import { Progress } from "@/components/ui/progress";
+import {
   Bot, Power, ShieldAlert, Activity, TrendingUp, TrendingDown,
   Clock, CheckCircle2, AlertTriangle, Zap, User, Cpu, Pause,
-  RotateCcw, Radio
+  RotateCcw, Radio, Settings, RefreshCw, Trophy
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
@@ -60,6 +65,61 @@ type BotConfig = {
 };
 
 type SettingsData = { hasPrivateKey: boolean };
+
+// ── Sports Agent Types ────────────────────────────────────────────────────────
+
+type SportConfigType = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  kalshiSeries: string[];
+  espnEndpoint: string;
+  maxExposurePct: number;
+  edgeThreshold: number;
+  modelWeight: number;
+};
+
+type SportsSignalType = {
+  id: string;
+  sport: string;
+  event: string;
+  side: string;
+  ticker: string;
+  kalshiPrice: number;
+  modelProbability: number;
+  edge: number;
+  action: string;
+  kellyFraction: number;
+  positionSizeUsd: number;
+  reasoning: string;
+  confidence: number;
+  riskLevel: string;
+  dataSource: string;
+  createdAt: string;
+  isLive: boolean;
+  score?: string;
+  period?: string;
+  momentum?: string;
+};
+
+type SportsAgentStateType = {
+  running: boolean;
+  bankroll: number;
+  dailyPnl: number;
+  dailyPnlPct: number;
+  tradesToday: number;
+  openPositions: number;
+  sportExposure: Record<string, number>;
+  signals: SportsSignalType[];
+  sports: SportConfigType[];
+  lastScan: string;
+  riskStatus: "normal" | "caution" | "halted";
+};
+
+const SPORT_EMOJI: Record<string, string> = {
+  nba: "\u{1F3C0}", mlb: "\u26BE", nhl: "\u{1F3D2}", soccer: "\u26BD", nfl: "\u{1F3C8}",
+  golf: "\u26F3", ufc: "\u{1F94A}", cbb: "\u{1F3C0}", tennis: "\u{1F3BE}", esports: "\u{1F3AE}",
+};
 
 // ── Mode Config ────────────────────────────────────────────────────────────────
 
@@ -174,6 +234,320 @@ function ActivityEntry({ trade }: { trade: PendingTrade }) {
         <div className="mono text-[10px]">${trade.estimatedCost.toFixed(2)}</div>
       </div>
     </div>
+  );
+}
+
+// ── Sports Agent Panel ────────────────────────────────────────────────────────
+
+function SportsAgentPanel() {
+  const { toast } = useToast();
+  const [showConfig, setShowConfig] = useState(false);
+  const [bankrollInput, setBankrollInput] = useState("");
+  const [lossLimitInput, setLossLimitInput] = useState("");
+  const [maxEventInput, setMaxEventInput] = useState("");
+
+  const { data: agentState } = useQuery<SportsAgentStateType>({
+    queryKey: ["/api/sports-agent/state"],
+    refetchInterval: 5000,
+  });
+
+  const { data: sports = [] } = useQuery<SportConfigType[]>({
+    queryKey: ["/api/sports-agent/sports"],
+    refetchInterval: 10000,
+  });
+
+  const toggleSportMutation = useMutation({
+    mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
+      apiRequest("POST", `./api/sports-agent/sports/${id}`, { enabled }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/sports-agent/sports"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/sports-agent/state"] });
+    },
+  });
+
+  const scanMutation = useMutation({
+    mutationFn: () => apiRequest("POST", "./api/sports-agent/scan", {}),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/sports-agent/state"] });
+      toast({ title: "Scan complete", description: "Sports agent scan finished." });
+    },
+    onError: (e: any) => {
+      toast({ title: "Scan failed", description: e?.message, variant: "destructive" });
+    },
+  });
+
+  const configMutation = useMutation({
+    mutationFn: (data: { bankroll?: number; dailyLossLimitPct?: number; maxPerEventPct?: number }) =>
+      apiRequest("POST", "./api/sports-agent/config", data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/sports-agent/state"] });
+      setShowConfig(false);
+      toast({ title: "Config updated", description: "Sports agent configuration saved." });
+    },
+  });
+
+  const executeMutation = useMutation({
+    mutationFn: (signalId: string) =>
+      apiRequest("POST", `./api/sports-agent/execute/${signalId}`, {}),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/sports-agent/state"] });
+      toast({ title: "Trade executed", description: "Signal executed successfully." });
+    },
+    onError: (e: any) => {
+      toast({ title: "Execution failed", description: e?.message, variant: "destructive" });
+    },
+  });
+
+  const st = agentState;
+  const lastScanAgo = st?.lastScan
+    ? `${Math.round((Date.now() - new Date(st.lastScan).getTime()) / 1000)}s ago`
+    : "never";
+
+  const riskColor = st?.riskStatus === "halted" ? "text-loss" : st?.riskStatus === "caution" ? "text-amber-400" : "text-profit";
+  const dailyLossUsedPct = st ? Math.min(100, Math.abs(st.dailyPnlPct / 15) * 100) : 0;
+
+  const signalsBySport = (sports ?? []).reduce<Record<string, number>>((acc, s) => {
+    acc[s.id] = (st?.signals ?? []).filter(sig => sig.sport === s.id).length;
+    return acc;
+  }, {});
+
+  return (
+    <>
+      <Card data-testid="sports-agent-card">
+        <CardHeader className="p-4 pb-2 flex flex-row items-center gap-2">
+          <Trophy className="w-4 h-4 text-primary" />
+          <CardTitle className="text-sm font-medium">Sports Agent</CardTitle>
+          <Badge
+            variant="outline"
+            data-testid="sports-agent-status"
+            className={`ml-auto text-[9px] px-1.5 py-0 h-4 ${st?.running ? "border-profit/40 text-profit" : "border-muted text-muted-foreground"}`}
+          >
+            {st?.running ? "ON" : "OFF"}
+          </Badge>
+        </CardHeader>
+        <CardContent className="p-4 pt-0 space-y-3">
+          {/* Summary Stats */}
+          <div className="grid grid-cols-3 gap-2 text-center">
+            <div>
+              <div className="mono text-sm font-bold" data-testid="sa-bankroll">${st?.bankroll?.toFixed(2) ?? "386.52"}</div>
+              <div className="text-[9px] text-muted-foreground uppercase">Bankroll</div>
+            </div>
+            <div>
+              <div className={`mono text-sm font-bold ${(st?.dailyPnl ?? 0) >= 0 ? "text-profit" : "text-loss"}`} data-testid="sa-daily-pnl">
+                {(st?.dailyPnl ?? 0) >= 0 ? "+" : ""}${Math.abs(st?.dailyPnl ?? 0).toFixed(2)}
+              </div>
+              <div className="text-[9px] text-muted-foreground uppercase">Daily P&L</div>
+            </div>
+            <div>
+              <div className={`text-sm font-bold ${riskColor}`} data-testid="sa-risk-status">
+                {st?.riskStatus === "halted" ? "Halted" : st?.riskStatus === "caution" ? "Caution" : "Normal"}
+              </div>
+              <div className="text-[9px] text-muted-foreground uppercase">Risk</div>
+            </div>
+          </div>
+          <div className="grid grid-cols-3 gap-2 text-center text-[10px] text-muted-foreground">
+            <div>Open: <span className="mono text-foreground">{st?.openPositions ?? 0}</span></div>
+            <div>Trades: <span className="mono text-foreground">{st?.tradesToday ?? 0}</span></div>
+            <div>Scan: <span className="mono text-foreground">{lastScanAgo}</span></div>
+          </div>
+
+          {/* Sport Controls */}
+          <div className="space-y-1" data-testid="sport-controls">
+            <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-1">Sport Controls</div>
+            {(sports ?? []).map(sport => {
+              const sigCount = signalsBySport[sport.id] ?? 0;
+              const hasSignals = sigCount > 0 && sport.enabled;
+              return (
+                <div key={sport.id} className={`flex items-center gap-2 py-1 px-2 rounded ${!sport.enabled ? "opacity-50" : ""}`}>
+                  <Switch
+                    data-testid={`toggle-sport-${sport.id}`}
+                    checked={sport.enabled}
+                    onCheckedChange={(checked) => toggleSportMutation.mutate({ id: sport.id, enabled: checked })}
+                    className="scale-75"
+                  />
+                  <span className="text-xs w-4">{SPORT_EMOJI[sport.id] ?? "\u{1F3C6}"}</span>
+                  <span className="text-xs flex-1 truncate">{sport.name}</span>
+                  <span className="text-[9px] text-muted-foreground mono">{sport.maxExposurePct}% max</span>
+                  <span className="text-[9px] text-muted-foreground mono">{sport.edgeThreshold}% edge</span>
+                  <div className={`w-2 h-2 rounded-full ${
+                    !sport.enabled ? "bg-muted" : hasSignals ? "bg-profit" : "bg-muted-foreground/30"
+                  }`} />
+                  <span className="text-[9px] mono w-12 text-right">
+                    {!sport.enabled ? "disabled" : `${sigCount} signal${sigCount !== 1 ? "s" : ""}`}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Live Signals */}
+          {(st?.signals ?? []).length > 0 && (
+            <div className="space-y-1" data-testid="live-signals">
+              <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-1">Live Signals</div>
+              <div className="space-y-1 max-h-48 overflow-y-auto">
+                {(st?.signals ?? []).slice(0, 10).map(sig => (
+                  <div
+                    key={sig.id}
+                    className="flex items-center gap-2 p-2 rounded-lg border border-border/30 hover:border-border/60 text-xs"
+                    data-testid={`signal-${sig.id}`}
+                  >
+                    <span className="w-4 text-center">{SPORT_EMOJI[sig.sport] ?? "\u{1F3C6}"}</span>
+                    <div className="flex-1 min-w-0">
+                      <div className="truncate font-medium">{sig.event}</div>
+                      <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
+                        <span className="mono">{sig.ticker}</span>
+                        {sig.isLive && sig.score && <span className="text-amber-400">{sig.score}</span>}
+                        {sig.isLive && sig.period && <span>{sig.period}</span>}
+                      </div>
+                    </div>
+                    <Badge
+                      variant="outline"
+                      className={`text-[9px] px-1 py-0 h-4 shrink-0 ${
+                        sig.action === "NO_TRADE" ? "text-muted-foreground" :
+                        sig.action.includes("YES") ? "border-profit/40 text-profit" :
+                        "border-loss/40 text-loss"
+                      }`}
+                    >
+                      {sig.action === "NO_TRADE" ? "HOLD" : sig.action.replace("_", " ")}
+                    </Badge>
+                    <span className={`mono text-[10px] shrink-0 ${sig.edge >= 0 ? "text-profit" : "text-loss"}`}>
+                      {sig.edge >= 0 ? "+" : ""}{sig.edge.toFixed(1)}%
+                    </span>
+                    {sig.action !== "NO_TRADE" && sig.positionSizeUsd > 0 && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-5 px-1.5 text-[9px]"
+                        data-testid={`execute-signal-${sig.id}`}
+                        onClick={() => executeMutation.mutate(sig.id)}
+                        disabled={executeMutation.isPending}
+                      >
+                        <Zap className="w-3 h-3" />
+                      </Button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Risk Dashboard */}
+          <div className="space-y-2" data-testid="risk-dashboard">
+            <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Risk Dashboard</div>
+            <div className="space-y-1.5">
+              <div className="flex items-center gap-2 text-[10px]">
+                <span className="w-24 text-muted-foreground">Daily Loss Used</span>
+                <Progress value={dailyLossUsedPct} className="flex-1 h-2" />
+                <span className="mono w-20 text-right">{Math.abs(st?.dailyPnlPct ?? 0).toFixed(1)}% / 15%</span>
+              </div>
+              {Object.entries(st?.sportExposure ?? {}).filter(([, v]) => v > 0).map(([sportId, amount]) => {
+                const sport = (sports ?? []).find(s => s.id === sportId);
+                const pct = st?.bankroll ? (amount / st.bankroll) * 100 : 0;
+                const maxPct = sport?.maxExposurePct ?? 40;
+                return (
+                  <div key={sportId} className="flex items-center gap-2 text-[10px]">
+                    <span className="w-24 text-muted-foreground truncate">{sport?.name ?? sportId}</span>
+                    <Progress value={Math.min(100, (pct / maxPct) * 100)} className="flex-1 h-2" />
+                    <span className="mono w-20 text-right">{pct.toFixed(0)}% / {maxPct}%</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Action Buttons */}
+          <div className="flex gap-2">
+            <Button
+              data-testid="button-sports-scan"
+              size="sm"
+              variant="outline"
+              className="flex-1"
+              onClick={() => scanMutation.mutate()}
+              disabled={scanMutation.isPending}
+            >
+              <RefreshCw className={`w-3.5 h-3.5 mr-1.5 ${scanMutation.isPending ? "animate-spin" : ""}`} />
+              {scanMutation.isPending ? "Scanning..." : "Scan Now"}
+            </Button>
+            <Button
+              data-testid="button-sports-config"
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                setBankrollInput(String(st?.bankroll ?? 386.52));
+                setLossLimitInput("15");
+                setMaxEventInput("5");
+                setShowConfig(true);
+              }}
+            >
+              <Settings className="w-3.5 h-3.5 mr-1.5" />
+              Configure
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Config Dialog */}
+      <Dialog open={showConfig} onOpenChange={setShowConfig}>
+        <DialogContent className="bg-card border-border max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Settings className="w-4 h-4" />
+              Sports Agent Configuration
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="space-y-1.5">
+              <Label className="text-xs">Bankroll ($)</Label>
+              <Input
+                data-testid="input-sa-bankroll"
+                type="number"
+                min={10}
+                value={bankrollInput}
+                onChange={e => setBankrollInput(e.target.value)}
+                className="h-9 text-sm mono"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs">Daily Loss Limit (%)</Label>
+              <Input
+                data-testid="input-sa-loss-limit"
+                type="number"
+                min={1}
+                max={50}
+                value={lossLimitInput}
+                onChange={e => setLossLimitInput(e.target.value)}
+                className="h-9 text-sm mono"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs">Max Per Event (%)</Label>
+              <Input
+                data-testid="input-sa-max-event"
+                type="number"
+                min={1}
+                max={25}
+                value={maxEventInput}
+                onChange={e => setMaxEventInput(e.target.value)}
+                className="h-9 text-sm mono"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              data-testid="button-sa-save-config"
+              onClick={() => configMutation.mutate({
+                bankroll: parseFloat(bankrollInput) || undefined,
+                dailyLossLimitPct: parseFloat(lossLimitInput) || undefined,
+                maxPerEventPct: parseFloat(maxEventInput) || undefined,
+              })}
+              disabled={configMutation.isPending}
+            >
+              {configMutation.isPending ? "Saving..." : "Save"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 
@@ -597,6 +971,9 @@ export default function AutonomousPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Sports Agent */}
+      <SportsAgentPanel />
 
       {/* Live Activity Feed */}
       <Card>

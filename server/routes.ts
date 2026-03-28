@@ -8,6 +8,11 @@ import {
 } from "@shared/schema";
 import { generateLiveSignals, checkPositionExits, calculateDynamicKelly, getCategoryMultiplier, type PositionInfo, type PositionExitCheck } from "./signal-engine";
 import { generateLiveSportsSignals, type LiveSportsState } from "./live-sports-engine";
+import {
+  runSportsAgentScan, getDefaultSports, updateSportConfig,
+  getAgentConfig, updateAgentConfig,
+  type SportsAgentState, type SportConfig, type SportsSignal,
+} from "./sports-agent";
 
 function getPositionsForRiskCheck(): PositionInfo[] {
   try {
@@ -1578,6 +1583,153 @@ export async function registerRoutes(
       res.status(500).json({ error: e.message });
     }
   });
+
+  // ── Sports Agent Routes ────────────────────────────────────────────────────
+  let sportsAgentState: SportsAgentState | null = null;
+
+  app.get("/api/sports-agent/state", async (_req, res) => {
+    try {
+      if (!sportsAgentState) {
+        // Return a default state before first scan
+        const sports = getDefaultSports();
+        const cfg = getAgentConfig();
+        res.json({
+          running: false,
+          bankroll: cfg.bankroll,
+          dailyPnl: 0,
+          dailyPnlPct: 0,
+          tradesToday: 0,
+          openPositions: 0,
+          sportExposure: {},
+          signals: [],
+          sports,
+          lastScan: "",
+          riskStatus: "normal",
+        } satisfies SportsAgentState);
+        return;
+      }
+      res.json(sportsAgentState);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get("/api/sports-agent/sports", async (_req, res) => {
+    try {
+      res.json(getDefaultSports());
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/sports-agent/sports/:id", async (req, res) => {
+    try {
+      const sportId = req.params.id;
+      const updates: Partial<SportConfig> = req.body;
+      updateSportConfig(sportId, updates);
+      res.json({ success: true, sport: getDefaultSports().find(s => s.id === sportId) });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/sports-agent/scan", async (_req, res) => {
+    try {
+      sportsAgentState = await runSportsAgentScan();
+      res.json(sportsAgentState);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/sports-agent/execute/:signalId", async (req, res) => {
+    try {
+      const signalId = req.params.signalId;
+      if (!sportsAgentState) {
+        return res.status(400).json({ error: "No scan data available. Run a scan first." });
+      }
+      const signal = sportsAgentState.signals.find(s => s.id === signalId);
+      if (!signal) {
+        return res.status(404).json({ error: "Signal not found" });
+      }
+      if (signal.action === "NO_TRADE") {
+        return res.status(400).json({ error: "Signal action is NO_TRADE" });
+      }
+
+      const side = signal.side;
+      const action = signal.action.startsWith("SELL") ? "sell" : "buy";
+      const priceCents = Math.round(signal.kalshiPrice * 100);
+      const contracts = Math.max(1, Math.floor(signal.positionSizeUsd / signal.kalshiPrice));
+
+      const execResult = await autoExecuteTrade(signal.ticker, side, action, contracts, priceCents);
+      if (execResult.ok) {
+        await storage.createAuditLog({
+          eventType: "SPORTS_AGENT_TRADE",
+          ticker: signal.ticker,
+          description: `Sports Agent executed: ${signal.action} ${signal.ticker} (${signal.sport}) — ${signal.event}. Edge: ${signal.edge.toFixed(1)}%`,
+          amount: signal.positionSizeUsd,
+          status: "success",
+          createdAt: new Date().toISOString(),
+        });
+        res.json({ success: true, orderId: execResult.orderId, signal });
+      } else {
+        res.status(500).json({ error: execResult.error, signal });
+      }
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/sports-agent/config", async (req, res) => {
+    try {
+      const { bankroll, dailyLossLimitPct, maxPerEventPct } = req.body;
+      updateAgentConfig({ bankroll, dailyLossLimitPct, maxPerEventPct });
+      res.json({ success: true, config: getAgentConfig() });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Sports Agent background scanner (30s interval)
+  setInterval(async () => {
+    try {
+      const mode = await storage.getBotMode();
+      if (mode === "halted") return;
+      sportsAgentState = await runSportsAgentScan();
+
+      // Auto-execute in autonomous/supervised mode
+      if (mode === "autonomous" || mode === "supervised") {
+        for (const sig of sportsAgentState.signals) {
+          if (sig.action === "NO_TRADE" || sig.positionSizeUsd <= 0) continue;
+          if (sig.edge < (getDefaultSports().find(s => s.id === sig.sport)?.edgeThreshold ?? 5)) continue;
+
+          const side = sig.side;
+          const action = sig.action.startsWith("SELL") ? "sell" : "buy";
+          const priceCents = Math.round(sig.kalshiPrice * 100);
+          const contracts = Math.max(1, Math.floor(sig.positionSizeUsd / sig.kalshiPrice));
+
+          try {
+            const execResult = await autoExecuteTrade(sig.ticker, side, action, contracts, priceCents);
+            if (execResult.ok) {
+              console.log(`[Sports Agent] Auto-executed: ${sig.action} ${sig.ticker} (${sig.sport})`);
+              await storage.createAuditLog({
+                eventType: "SPORTS_AGENT_AUTO",
+                ticker: sig.ticker,
+                description: `Sports Agent auto-executed: ${sig.action} ${sig.ticker} (${sig.sport}) — ${sig.event}. Edge: ${sig.edge.toFixed(1)}%`,
+                amount: sig.positionSizeUsd,
+                status: "success",
+                createdAt: new Date().toISOString(),
+              });
+            }
+          } catch (execErr) {
+            console.error(`[Sports Agent] Auto-execute failed for ${sig.ticker}:`, execErr);
+          }
+        }
+      }
+    } catch (err) {
+      console.error("[Sports Agent] Background scan error:", err);
+    }
+  }, 30_000);
 
   // ── Background Signal Scanner ─────────────────────────────────────────────
   async function runSignalScan(isInitial = false) {
