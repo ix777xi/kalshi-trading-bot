@@ -21,11 +21,12 @@ export interface LiveSignal {
   edgeScore: number;
   trueProbability: number;
   marketPrice: number;
-  signalType: "BUY_YES" | "BUY_NO" | "NO_TRADE";
+  signalType: "BUY_YES" | "BUY_NO" | "SELL_YES" | "SELL_NO" | "NO_TRADE";
   modelConfidence: number;
   modelName: string;
   edgeSource: string;
   reasoning: string;
+  riskLevel: "low" | "medium" | "high" | "critical";
   createdAt: string;
 }
 
@@ -119,6 +120,7 @@ function analyzeLongshotBias(market: KalshiMarket): LiveSignal | null {
     modelName: "Longshot-Bias-Model",
     edgeSource: "favorite_longshot_bias",
     reasoning,
+    riskLevel: midPrice <= 0.05 ? "high" : midPrice <= 0.15 ? "medium" : "low",
     createdAt: new Date().toISOString(),
   };
 }
@@ -161,6 +163,7 @@ function analyzeYesNoAsymmetry(market: KalshiMarket): LiveSignal | null {
     modelName: "YES-NO-Asymmetry",
     edgeSource: "yes_no_asymmetry",
     reasoning: `At ${(midPrice*100).toFixed(0)}¢, taker flow is dominated by optimistic YES buyers (UI default bias). NO outperforms YES at 69 of 99 price levels. Dollar-weighted, YES returns -1.02% while NO returns +0.83%. Post-only NO limit orders also capture the 0.05% maker rebate.`,
+    riskLevel: "low",
     createdAt: new Date().toISOString(),
   };
 }
@@ -287,6 +290,7 @@ async function analyzeWeatherMarkets(): Promise<LiveSignal[]> {
           modelName: "GFS-31-Ensemble",
           edgeSource: "weather_model",
           reasoning: `GFS 31-member ensemble: ${memberTemps.length} members forecast ${targetDate} NYC high of ${meanTemp.toFixed(0)}°F (range ${Math.min(...memberTemps).toFixed(0)}-${Math.max(...memberTemps).toFixed(0)}°F).${pointForecast ? ` Point forecast: ${pointForecast.toFixed(0)}°F.` : ''} Ensemble gives ${(gfsProbability*100).toFixed(0)}% probability for this bracket vs. market price of ${(marketPrice*100).toFixed(0)}¢ — a ${Math.abs(edge).toFixed(1)}% edge. ${daysOut <= 2 ? 'Near-term forecast (high accuracy).' : 'Multi-day forecast — edge may narrow as resolution approaches.'}`,
+          riskLevel: Math.abs(edge) > 30 ? "low" : Math.abs(edge) > 15 ? "low" : "medium",
           createdAt: new Date().toISOString(),
         });
       }
@@ -325,11 +329,12 @@ function analyzeMarketStructure(market: KalshiMarket): LiveSignal | null {
       edgeScore: parseFloat(makerEdge.toFixed(2)),
       trueProbability: parseFloat(midPrice.toFixed(3)),
       marketPrice: parseFloat(midPrice.toFixed(3)),
-      signalType: "BUY_YES", // Market making — post limit orders on both sides
+      signalType: "BUY_YES",
       modelConfidence: parseFloat(Math.min(0.78, 0.55 + (Math.min(oi, 10000) / 10000) * 0.23).toFixed(3)),
       modelName: "Spread-Structure",
       edgeSource: "market_maker_spread",
       reasoning: `Wide spread of ${(spread*100).toFixed(0)}¢ with ${oi.toFixed(0)} open interest. Post-only limit orders near the midpoint (${(midPrice*100).toFixed(0)}¢) capture the spread + Kalshi's 0.05% maker rebate. Makers earn +1.12% avg excess return vs. takers. Rebalance every 30-60s.`,
+      riskLevel: "low",
       createdAt: new Date().toISOString(),
     };
   }
@@ -337,9 +342,150 @@ function analyzeMarketStructure(market: KalshiMarket): LiveSignal | null {
   return null;
 }
 
+// ── Edge #5: Risk Monitor — Detect positions that should be SOLD ──────────────
+// Generates SELL signals when market conditions indicate risk for existing positions:
+// - Price convergence near resolution (spread widens, edge vanishes)
+// - Model confidence drops below threshold
+// - Edge reversal (what was a BUY is now negative edge)
+// - Late-market convergence (contract approaching $0 or $1)
+
+interface PositionInfo {
+  ticker: string;
+  title: string;
+  side: string;        // "yes" or "no"
+  entryPrice: number;  // 0-1
+  quantity: number;
+}
+
+function analyzeRiskExits(market: KalshiMarket, positions: PositionInfo[]): LiveSignal[] {
+  const signals: LiveSignal[] = [];
+  const yesBid = parseFloat(market.yes_bid_dollars || "0");
+  const noBid = parseFloat(market.no_bid_dollars || "0");
+  const volume = parseFloat(market.volume_fp || "0");
+  const oi = parseFloat(market.open_interest_fp || "0");
+
+  if (yesBid <= 0 && noBid <= 0) return signals;
+
+  const currentPrice = yesBid > 0 ? yesBid : (1 - noBid);
+  if (currentPrice <= 0 || currentPrice >= 1) return signals;
+
+  // Check each position in this market
+  for (const pos of positions) {
+    if (pos.ticker !== market.ticker) continue;
+
+    const isYesPosition = pos.side === "yes";
+    const entryPrice = pos.entryPrice;
+    const pnlPct = isYesPosition
+      ? ((currentPrice - entryPrice) / entryPrice) * 100
+      : ((entryPrice - currentPrice) / entryPrice) * 100;
+
+    // ── RISK #1: Stop-loss hit — position down 50%+ ──
+    if (pnlPct <= -50) {
+      signals.push({
+        ticker: market.ticker,
+        title: market.title || market.ticker,
+        eventTicker: market.event_ticker,
+        edgeScore: parseFloat(pnlPct.toFixed(2)),
+        trueProbability: currentPrice,
+        marketPrice: currentPrice,
+        signalType: isYesPosition ? "SELL_YES" : "SELL_NO",
+        modelConfidence: 0.95,
+        modelName: "Risk-Monitor",
+        edgeSource: "stop_loss",
+        reasoning: `STOP-LOSS triggered. Your ${pos.side.toUpperCase()} position entered at ${(entryPrice*100).toFixed(0)}¢ is now at ${(currentPrice*100).toFixed(0)}¢ — down ${Math.abs(pnlPct).toFixed(0)}%. The position has lost more than 50% of entry value. Risk management imperative: exit to preserve capital. Remaining in a losing position beyond stop-loss increases adverse selection risk.`,
+        riskLevel: "critical",
+        createdAt: new Date().toISOString(),
+      });
+      continue;
+    }
+
+    // ── RISK #2: Edge reversal — your position's edge has flipped negative ──
+    if (isYesPosition && currentPrice > 0.85 && entryPrice < 0.70) {
+      // YES position has run up to near certainty — take profit
+      signals.push({
+        ticker: market.ticker,
+        title: market.title || market.ticker,
+        eventTicker: market.event_ticker,
+        edgeScore: parseFloat(pnlPct.toFixed(2)),
+        trueProbability: currentPrice,
+        marketPrice: currentPrice,
+        signalType: "SELL_YES",
+        modelConfidence: 0.88,
+        modelName: "Risk-Monitor",
+        edgeSource: "take_profit",
+        reasoning: `TAKE-PROFIT opportunity. Your YES position entered at ${(entryPrice*100).toFixed(0)}¢ is now at ${(currentPrice*100).toFixed(0)}¢ — up ${pnlPct.toFixed(0)}%. Price is converging toward $1 (near certainty). Late-market convergence reduces remaining upside while the spread widens. Lock in profits now — the last 10-15¢ of movement carries the most slippage risk.`,
+        riskLevel: "medium",
+        createdAt: new Date().toISOString(),
+      });
+      continue;
+    }
+
+    if (!isYesPosition && currentPrice < 0.15 && entryPrice > 0.30) {
+      // NO position has run up (YES collapsed) — take profit on NO
+      signals.push({
+        ticker: market.ticker,
+        title: market.title || market.ticker,
+        eventTicker: market.event_ticker,
+        edgeScore: parseFloat(pnlPct.toFixed(2)),
+        trueProbability: currentPrice,
+        marketPrice: currentPrice,
+        signalType: "SELL_NO",
+        modelConfidence: 0.88,
+        modelName: "Risk-Monitor",
+        edgeSource: "take_profit",
+        reasoning: `TAKE-PROFIT opportunity. Your NO position (entered when YES was ${(entryPrice*100).toFixed(0)}¢) is deep in profit — YES has collapsed to ${(currentPrice*100).toFixed(0)}¢. Price is converging toward $0. Lock in gains before resolution — late-market spread widening can erode profits.`,
+        riskLevel: "medium",
+        createdAt: new Date().toISOString(),
+      });
+      continue;
+    }
+
+    // ── RISK #3: Liquidity dried up — can't exit cleanly later ──
+    if (oi > 0 && volume < 20 && pos.quantity > 20) {
+      signals.push({
+        ticker: market.ticker,
+        title: market.title || market.ticker,
+        eventTicker: market.event_ticker,
+        edgeScore: parseFloat(pnlPct.toFixed(2)),
+        trueProbability: currentPrice,
+        marketPrice: currentPrice,
+        signalType: isYesPosition ? "SELL_YES" : "SELL_NO",
+        modelConfidence: 0.78,
+        modelName: "Risk-Monitor",
+        edgeSource: "liquidity_risk",
+        reasoning: `LIQUIDITY WARNING. Your ${pos.quantity}-contract ${pos.side.toUpperCase()} position is in a market with only ${volume.toFixed(0)} contracts traded recently. Low liquidity means you may not be able to exit at a fair price later. Wide bid-ask spreads in thin markets create adverse selection risk. Consider reducing position size now while there's still some book depth.`,
+        riskLevel: "high",
+        createdAt: new Date().toISOString(),
+      });
+      continue;
+    }
+
+    // ── RISK #4: Position down 25-50% — warning level ──
+    if (pnlPct <= -25) {
+      signals.push({
+        ticker: market.ticker,
+        title: market.title || market.ticker,
+        eventTicker: market.event_ticker,
+        edgeScore: parseFloat(pnlPct.toFixed(2)),
+        trueProbability: currentPrice,
+        marketPrice: currentPrice,
+        signalType: isYesPosition ? "SELL_YES" : "SELL_NO",
+        modelConfidence: 0.72,
+        modelName: "Risk-Monitor",
+        edgeSource: "drawdown_warning",
+        reasoning: `DRAWDOWN WARNING. Your ${pos.side.toUpperCase()} position entered at ${(entryPrice*100).toFixed(0)}¢ is now at ${(currentPrice*100).toFixed(0)}¢ — down ${Math.abs(pnlPct).toFixed(0)}%. Approaching stop-loss territory. Consider reducing size by 50% to limit further downside while keeping some exposure if the market recovers. Fractional Kelly sizing suggests position is oversized at this drawdown level.`,
+        riskLevel: "high",
+        createdAt: new Date().toISOString(),
+      });
+    }
+  }
+
+  return signals;
+}
+
 // ── Main Signal Generation ────────────────────────────────────────────────────
 
-export async function generateLiveSignals(): Promise<LiveSignal[]> {
+export async function generateLiveSignals(existingPositions?: PositionInfo[]): Promise<LiveSignal[]> {
   console.log("[Signal Engine] Generating live signals...");
   const allSignals: LiveSignal[] = [];
 
@@ -365,23 +511,41 @@ export async function generateLiveSignals(): Promise<LiveSignal[]> {
 
       const structureSignal = analyzeMarketStructure(market);
       if (structureSignal) allSignals.push(structureSignal);
+
+      // Run risk exit analysis if we have positions
+      if (existingPositions && existingPositions.length > 0) {
+        const exitSignals = analyzeRiskExits(market, existingPositions);
+        allSignals.push(...exitSignals);
+      }
     }
 
     // Run weather model analysis
     const weatherSignals = await analyzeWeatherMarkets();
     allSignals.push(...weatherSignals);
 
-    // Sort by absolute edge × confidence (best opportunities first)
+    // Sort: SELL (risk) signals first, then by absolute edge × confidence
     allSignals.sort((a, b) => {
+      // Critical risk signals always float to top
+      const aIsSell = a.signalType.startsWith("SELL") ? 1 : 0;
+      const bIsSell = b.signalType.startsWith("SELL") ? 1 : 0;
+      if (aIsSell !== bIsSell) return bIsSell - aIsSell;
+
+      const aIsCritical = a.riskLevel === "critical" ? 1 : 0;
+      const bIsCritical = b.riskLevel === "critical" ? 1 : 0;
+      if (aIsCritical !== bIsCritical) return bIsCritical - aIsCritical;
+
       const scoreA = Math.abs(a.edgeScore) * a.modelConfidence;
       const scoreB = Math.abs(b.edgeScore) * b.modelConfidence;
       return scoreB - scoreA;
     });
 
-    console.log(`[Signal Engine] Generated ${allSignals.length} live signals`);
+    console.log(`[Signal Engine] Generated ${allSignals.length} signals (${allSignals.filter(s => s.signalType.startsWith('SELL')).length} SELL/risk exits)`);
   } catch (e) {
     console.error("[Signal Engine] Error:", e);
   }
 
   return allSignals;
 }
+
+// Export the PositionInfo type for use in routes
+export type { PositionInfo };

@@ -15,7 +15,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import {
   TrendingUp, TrendingDown, Target, Shield, DollarSign, CheckCircle2,
   AlertTriangle, Zap, User, Clock, ChevronDown, X, Edit3, Activity,
-  Cloud, BarChart3, Layers
+  Cloud, BarChart3, Layers, ShieldAlert
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
@@ -60,6 +60,14 @@ function getEdgeSourceInfo(edgeSource: string): { label: string; color: string; 
       return { label: "Weather GFS", color: "bg-cyan-500/20 text-cyan-400 border-cyan-500/30", icon: Cloud };
     case "market_maker_spread":
       return { label: "Spread Structure", color: "bg-blue-500/20 text-blue-400 border-blue-500/30", icon: Layers };
+    case "stop_loss":
+      return { label: "Stop-Loss Exit", color: "bg-red-500/20 text-red-400 border-red-500/30", icon: ShieldAlert };
+    case "take_profit":
+      return { label: "Take Profit", color: "bg-green-500/20 text-green-400 border-green-500/30", icon: TrendingUp };
+    case "liquidity_risk":
+      return { label: "Liquidity Risk", color: "bg-yellow-500/20 text-yellow-400 border-yellow-500/30", icon: AlertTriangle };
+    case "drawdown_warning":
+      return { label: "Drawdown Warning", color: "bg-orange-500/20 text-orange-400 border-orange-500/30", icon: TrendingDown };
     default:
       return { label: edgeSource, color: "bg-gray-500/20 text-gray-400 border-gray-500/30", icon: BarChart3 };
   }
@@ -105,6 +113,7 @@ function PendingTradeCard({ trade, hasPrivateKey }: { trade: PendingTrade; hasPr
   const edgeSourceInfo = getEdgeSourceInfo(trade.edgeSource);
   const EdgeIcon = edgeSourceInfo.icon;
   const isYes = trade.side === "yes";
+  const isSell = trade.action === "sell";
 
   const modCost = ((modContracts * modPriceCents) / 100).toFixed(2);
   const modProfit = ((modContracts * (100 - modPriceCents)) / 100).toFixed(2);
@@ -190,7 +199,7 @@ function PendingTradeCard({ trade, hasPrivateKey }: { trade: PendingTrade; hasPr
         {/* Header row */}
         <div className="flex items-start justify-between gap-3">
           <div className="flex items-start gap-3 flex-1 min-w-0">
-            <div className={`flex items-center justify-center w-9 h-9 rounded-lg shrink-0 ${isYes ? "bg-profit/10" : "bg-loss/10"}`}>
+            <div className={`flex items-center justify-center w-9 h-9 rounded-lg shrink-0 ${isSell ? "bg-yellow-500/10" : isYes ? "bg-profit/10" : "bg-loss/10"}`}>
               {isYes ? (
                 <TrendingUp className="w-4.5 h-4.5 text-profit" />
               ) : (
@@ -202,9 +211,9 @@ function PendingTradeCard({ trade, hasPrivateKey }: { trade: PendingTrade; hasPr
                 <h3 className="text-sm font-semibold leading-tight truncate max-w-xs">{trade.title || trade.ticker}</h3>
                 <Badge
                   variant="outline"
-                  className={`text-[10px] px-1.5 border shrink-0 ${isYes ? "border-profit/40 text-profit" : "border-loss/40 text-loss"}`}
+                  className={`text-[10px] px-1.5 border shrink-0 ${isSell ? "border-yellow-500/40 text-yellow-400" : isYes ? "border-profit/40 text-profit" : "border-loss/40 text-loss"}`}
                 >
-                  {isYes ? "BUY YES" : "BUY NO"}
+                  {isSell ? (isYes ? "SELL YES" : "SELL NO") : (isYes ? "BUY YES" : "BUY NO")}
                 </Badge>
               </div>
               <div className="flex items-center gap-2 flex-wrap">
@@ -221,7 +230,7 @@ function PendingTradeCard({ trade, hasPrivateKey }: { trade: PendingTrade; hasPr
             </div>
           </div>
           <div className="text-right shrink-0">
-            <div className={`text-lg font-bold mono ${isYes ? "text-profit" : "text-loss"}`}>
+            <div className={`text-lg font-bold mono ${isSell ? "text-yellow-400" : isYes ? "text-profit" : "text-loss"}`}>
               {trade.edgeScore > 0 ? "+" : ""}{trade.edgeScore.toFixed(1)}%
             </div>
             <div className="text-[9px] text-muted-foreground uppercase tracking-wide">Edge</div>
@@ -409,14 +418,14 @@ function PendingTradeCard({ trade, hasPrivateKey }: { trade: PendingTrade; hasPr
         <AlertDialogContent className="bg-card border-border max-w-sm">
           <AlertDialogHeader>
             <AlertDialogTitle className="text-sm">
-              Confirm Trade: {isYes ? "BUY YES" : "BUY NO"} — {trade.ticker}
+              Confirm Trade: {isSell ? (isYes ? "SELL YES" : "SELL NO") : (isYes ? "BUY YES" : "BUY NO")} — {trade.ticker}
             </AlertDialogTitle>
             <AlertDialogDescription asChild>
               <div className="space-y-3">
                 <div className="bg-muted/30 rounded-md p-3 space-y-1.5 text-xs">
                   <div><span className="text-muted-foreground">Event: </span><span className="font-medium">{trade.title || trade.ticker}</span></div>
                   <div><span className="text-muted-foreground">Action: </span>
-                    <span className={`font-medium ${isYes ? "text-profit" : "text-loss"}`}>{isYes ? "BUY YES" : "BUY NO"}</span>
+                    <span className={`font-medium ${isYes ? "text-profit" : "text-loss"}`}>{isSell ? (isYes ? "SELL YES" : "SELL NO") : (isYes ? "BUY YES" : "BUY NO")}</span>
                   </div>
                   <div><span className="text-muted-foreground">Contracts: </span><span className="mono font-medium">{trade.contracts}</span></div>
                   <div><span className="text-muted-foreground">Price: </span><span className="mono font-medium">{trade.priceCents}¢</span></div>
@@ -436,7 +445,7 @@ function PendingTradeCard({ trade, hasPrivateKey }: { trade: PendingTrade; hasPr
             <AlertDialogCancel data-testid="button-cancel-confirm" className="text-xs">Cancel</AlertDialogCancel>
             <AlertDialogAction
               data-testid="button-confirm-trade"
-              className={`text-xs ${isYes ? "bg-profit hover:bg-profit/90 text-black" : "bg-loss hover:bg-loss/90 text-white"}`}
+              className={`text-xs ${isSell ? "bg-yellow-500 hover:bg-yellow-600 text-black" : isYes ? "bg-profit hover:bg-profit/90 text-black" : "bg-loss hover:bg-loss/90 text-white"}`}
               onClick={() => {
                 setShowConfirm(false);
                 approveMutation.mutate();
@@ -479,13 +488,13 @@ function DecidedTradeRow({ trade }: { trade: PendingTrade }) {
           {getStatusBadge(trade.status)}
         </div>
         <div className="flex items-center gap-3 text-muted-foreground mt-0.5">
-          <span>{isYes ? "BUY YES" : "BUY NO"} · {trade.contracts} contracts @ {trade.priceCents}¢</span>
+          <span>{isSell ? (isYes ? "SELL YES" : "SELL NO") : (isYes ? "BUY YES" : "BUY NO")} · {trade.contracts} contracts @ {trade.priceCents}¢</span>
           {trade.orderId && <span className="mono text-[10px]">#{trade.orderId.slice(0, 8)}</span>}
           {trade.errorMessage && <span className="text-red-400 truncate max-w-xs">{trade.errorMessage}</span>}
         </div>
       </div>
       <div className="text-right shrink-0">
-        <div className={`mono font-semibold ${isYes ? "text-profit" : "text-loss"}`}>
+        <div className={`mono font-semibold ${trade.action === "sell" ? "text-yellow-400" : isYes ? "text-profit" : "text-loss"}`}>
           {trade.edgeScore > 0 ? "+" : ""}{trade.edgeScore.toFixed(1)}%
         </div>
         <div className="text-muted-foreground text-[10px]">

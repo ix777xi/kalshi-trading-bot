@@ -6,7 +6,22 @@ import {
   positions, orders, signals, agents, portfolio, pnlHistory,
   riskConfig, auditLog, backtestResults, equityCurve, settings,
 } from "@shared/schema";
-import { generateLiveSignals } from "./signal-engine";
+import { generateLiveSignals, type PositionInfo } from "./signal-engine";
+
+function getPositionsForRiskCheck(): PositionInfo[] {
+  try {
+    const rows = db.select().from(positions).all();
+    return rows.map(r => ({
+      ticker: r.ticker,
+      title: r.title,
+      side: r.side,
+      entryPrice: r.entryPrice,
+      quantity: r.quantity,
+    }));
+  } catch {
+    return [];
+  }
+}
 import { randomUUID } from "crypto";
 
 const KALSHI_BASE = "https://api.elections.kalshi.com/trade-api/v2";
@@ -440,7 +455,7 @@ export async function registerRoutes(
   app.get("/api/signals", async (_req, res) => {
     // Try live signals first, fall back to DB
     try {
-      const liveSignals = await generateLiveSignals();
+      const liveSignals = await generateLiveSignals(getPositionsForRiskCheck());
       if (liveSignals.length > 0) {
         return res.json(liveSignals.map((s, idx) => ({ ...s, id: idx + 1 })));
       }
@@ -632,14 +647,16 @@ export async function registerRoutes(
       }
 
       const isYes = trade.side === "yes";
+      const isSell = trade.action === "sell";
       const orderBody: any = {
         ticker: trade.ticker,
         side: trade.side,
-        action: "buy",
+        action: isSell ? "sell" : "buy",
         count: trade.contracts,
         type: "limit",
         client_order_id: randomUUID(),
-        post_only: true,
+        post_only: !isSell, // Sell orders use IOC for faster exit
+        ...(isSell ? { reduce_only: true } : {}),
       };
       if (isYes) {
         orderBody.yes_price = trade.priceCents;
@@ -707,7 +724,7 @@ export async function registerRoutes(
       return signalCache.data;
     }
     try {
-      const liveSignals = await generateLiveSignals();
+      const liveSignals = await generateLiveSignals(getPositionsForRiskCheck());
       signalCache = { data: liveSignals, ts: now };
       return liveSignals;
     } catch (e) {
@@ -775,21 +792,31 @@ export async function registerRoutes(
 
       for (const sig of signals) {
         if (existingTickers.has(sig.ticker)) continue;
-        if (Math.abs(sig.edgeScore) < minEdge) continue;
-        if (sig.modelConfidence * 100 < minConf) continue;
         if (sig.signalType === "NO_TRADE") continue;
 
-        const side = sig.signalType === "BUY_YES" ? "yes" : "no";
+        const isSell = sig.signalType.startsWith("SELL");
+        // SELL signals bypass edge/confidence thresholds — risk exits are always surfaced
+        if (!isSell) {
+          if (Math.abs(sig.edgeScore) < minEdge) continue;
+          if (sig.modelConfidence * 100 < minConf) continue;
+        }
+
+        const side = (sig.signalType === "BUY_YES" || sig.signalType === "SELL_YES") ? "yes" : "no";
+        const action = isSell ? "sell" : "buy";
         const priceCents = Math.round(sig.marketPrice * 100);
-        const contracts = Math.min(maxContracts, Math.max(1, Math.floor(maxCost / sig.marketPrice)));
+        const contracts = isSell
+          ? 50
+          : Math.min(maxContracts, Math.max(1, Math.floor(maxCost / Math.max(sig.marketPrice, 0.01))));
         const estimatedCost = parseFloat((contracts * sig.marketPrice).toFixed(2));
-        const maxProfit = parseFloat((contracts * (1 - sig.marketPrice)).toFixed(2));
+        const maxProfit = isSell
+          ? estimatedCost
+          : parseFloat((contracts * (1 - sig.marketPrice)).toFixed(2));
 
         await storage.createPendingTrade({
           ticker: sig.ticker,
           title: sig.title,
           side,
-          action: "buy",
+          action,
           contracts,
           priceCents,
           estimatedCost,
