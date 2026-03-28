@@ -7,6 +7,7 @@ import {
   riskConfig, auditLog, backtestResults, equityCurve, settings, pendingTrades,
 } from "@shared/schema";
 import { generateLiveSignals, type PositionInfo } from "./signal-engine";
+import { generateLiveSportsSignals, type LiveSportsState } from "./live-sports-engine";
 
 function getPositionsForRiskCheck(): PositionInfo[] {
   try {
@@ -1617,6 +1618,110 @@ export async function registerRoutes(
 
   // Kick off initial scan after 5 seconds (so server is fully up)
   setTimeout(() => runSignalScan(true), 5_000);
+
+  // ── Live Sports Engine ───────────────────────────────────────────────────
+  let liveSportsEnabled = false;
+  let liveSportsState: LiveSportsState | null = null;
+  let liveSportsEngineStartTime: Date | null = null;
+
+  app.get("/api/live-sports", async (_req, res) => {
+    try {
+      // Always return latest state; if engine off return a blank state
+      if (!liveSportsState) {
+        // Do a one-off fetch so the UI can show upcoming games even when engine is off
+        liveSportsState = await generateLiveSportsSignals();
+      }
+      res.json({ ...liveSportsState, engineRunning: liveSportsEnabled });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/live-sports/toggle", async (_req, res) => {
+    try {
+      liveSportsEnabled = !liveSportsEnabled;
+      if (liveSportsEnabled) {
+        liveSportsEngineStartTime = new Date();
+        // Immediately do a scan
+        liveSportsState = await generateLiveSportsSignals();
+      } else {
+        liveSportsEngineStartTime = null;
+      }
+      res.json({ engineRunning: liveSportsEnabled, engineStartTime: liveSportsEngineStartTime?.toISOString() ?? null });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get("/api/live-sports/status", (_req, res) => {
+    res.json({
+      engineRunning: liveSportsEnabled,
+      engineStartTime: liveSportsEngineStartTime?.toISOString() ?? null,
+    });
+  });
+
+  // Background loop: runs every 15 seconds when engine is enabled
+  setInterval(async () => {
+    if (!liveSportsEnabled) return;
+    try {
+      liveSportsState = await generateLiveSportsSignals();
+
+      // Read bot mode from settings
+      const settingsRow = await storage.getSettings();
+      const botMode = settingsRow?.botMode || "hitl";
+
+      // For autonomous/supervised: auto-queue signals as pending trades
+      if (botMode === "autonomous" || botMode === "supervised") {
+        for (const game of liveSportsState.activeGames) {
+          if (game.signal === "NONE" || game.signal === "HOLD") continue;
+
+          const isBuy = game.signal.startsWith("BUY");
+          const isHome = game.signal.includes("HOME");
+          const ticker = isHome ? game.kalshiHomeTicker : game.kalshiAwayTicker;
+          if (!ticker) continue;
+
+          // Skip if we already have a pending trade for this ticker
+          const existing = await storage.getPendingTrades("pending");
+          if (existing.some((t) => t.ticker === ticker)) continue;
+
+          const price = isHome ? game.kalshiHomePrice : game.kalshiAwayPrice;
+          const edge = isHome ? game.homeEdge : game.awayEdge;
+          const modelProb = isHome ? game.modelHomeProb : game.modelAwayProb;
+          const contracts = Math.min(50, Math.floor(100 / Math.max(price * 100, 1)));
+
+          await storage.createPendingTrade({
+            ticker,
+            title: `${game.away} @ ${game.home} — Live Q${game.period} ${game.clock}`,
+            side: "yes",
+            action: isBuy ? "buy" : "sell",
+            contracts,
+            priceCents: Math.round(price * 100),
+            estimatedCost: parseFloat((contracts * price).toFixed(2)),
+            maxProfit: parseFloat((contracts * (1 - price)).toFixed(2)),
+            edgeScore: parseFloat((edge * 100).toFixed(2)),
+            trueProbability: modelProb,
+            marketPrice: price,
+            modelConfidence: 0.80,
+            modelName: "Live-Sports-Engine",
+            edgeSource: "live_sports_gap",
+            reasoning: game.reasoning,
+            status: botMode === "autonomous" ? "approved" : "pending",
+            createdAt: new Date().toISOString(),
+            decidedAt: null,
+            executedAt: null,
+            orderId: null,
+            errorMessage: null,
+            gapType: "E",
+            executableEdge: edge,
+            kellySize: parseFloat((contracts * price).toFixed(2)),
+            autoExecuted: false,
+          });
+        }
+      }
+    } catch (e) {
+      console.error("[Live Sports] Background loop error:", e);
+    }
+  }, 15_000);
 
   return httpServer;
 }

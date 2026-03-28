@@ -3,7 +3,7 @@ import { useHashLocation } from "wouter/use-hash-location";
 import {
   LayoutDashboard, TrendingUp, Zap, ShoppingCart, Briefcase,
   Shield, FlaskConical, ClipboardList, Settings, Activity,
-  ChevronRight, Sparkles, User, Bot, Trophy
+  ChevronRight, Sparkles, User, Bot, Trophy, Radio
 } from "lucide-react";
 import {
   Sidebar, SidebarContent, SidebarGroup, SidebarGroupContent,
@@ -25,6 +25,7 @@ const navItems = [
   { title: "Compliance", url: "/compliance", icon: ClipboardList, group: "Management" },
   { title: "Human in the Loop", url: "/hitl", icon: User, group: "Trading" },
   { title: "Today's Picks", url: "/picks", icon: Trophy, group: "Trading" },
+  { title: "Live Sports", url: "/live-sports", icon: Radio, group: "Trading" },
   { title: "Alpha Edges", url: "/alpha", icon: Sparkles, group: "Strategy" },
   { title: "Bot Control", url: "/autonomous", icon: Bot, group: "Autonomous" },
   { title: "Settings", url: "/settings", icon: Settings, group: "System" },
