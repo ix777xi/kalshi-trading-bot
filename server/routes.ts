@@ -17,6 +17,10 @@ import {
   evaluatePosition, evaluateEntry, evaluateHedge, dailyScan, markTierTaken,
   type PositionState, type DecisionAction,
 } from "./decision-engine";
+import {
+  runStrategyScanner, getStrategies, updateStrategy,
+  type StrategyState,
+} from "./strategy-engine";
 
 function getPositionsForRiskCheck(): PositionInfo[] {
   try {
@@ -856,6 +860,114 @@ export async function registerRoutes(
       res.status(500).json({ error: e.message });
     }
   });
+
+  // ── Strategy Engine ──────────────────────────────────────────────────────
+  let strategyCache: { data: StrategyState; ts: number } | null = null;
+  const STRATEGY_CACHE_TTL = 30_000;
+
+  async function getCachedStrategyState(): Promise<StrategyState> {
+    const n = Date.now();
+    if (strategyCache && n - strategyCache.ts < STRATEGY_CACHE_TTL) {
+      return strategyCache.data;
+    }
+    try {
+      const state = await runStrategyScanner();
+      strategyCache = { data: state, ts: n };
+      return state;
+    } catch (e) {
+      console.error("[Strategy Engine] Scan failed:", e);
+      if (strategyCache) return strategyCache.data;
+      return { strategies: getStrategies(), signals: [], lastScan: new Date().toISOString(), activeStrategyCount: 0, totalSignals: 0 };
+    }
+  }
+
+  // GET /api/strategies/state — Full strategy state
+  app.get("/api/strategies/state", async (_req, res) => {
+    try {
+      const state = await getCachedStrategyState();
+      res.json(state);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // GET /api/strategies — List of strategy configs
+  app.get("/api/strategies", (_req, res) => {
+    res.json(getStrategies());
+  });
+
+  // POST /api/strategies/:id — Toggle/update a strategy config
+  app.post("/api/strategies/:id", (req, res) => {
+    const updated = updateStrategy(req.params.id, req.body);
+    if (!updated) return res.status(404).json({ error: "Strategy not found" });
+    // Invalidate cache so next state fetch reflects new config
+    strategyCache = null;
+    res.json(updated);
+  });
+
+  // POST /api/strategies/scan — Trigger immediate scan
+  app.post("/api/strategies/scan", async (_req, res) => {
+    try {
+      const state = await runStrategyScanner();
+      strategyCache = { data: state, ts: Date.now() };
+      res.json(state);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Background strategy scanner: every 45 seconds
+  setInterval(async () => {
+    try {
+      const currentMode = await storage.getBotMode();
+      if (currentMode === "halted") return;
+
+      const state = await runStrategyScanner();
+      strategyCache = { data: state, ts: Date.now() };
+
+      // In autonomous/supervised mode, auto-queue high-priority signals as pending trades
+      if (currentMode === "autonomous" || currentMode === "supervised") {
+        for (const sig of state.signals) {
+          if (sig.action === "NO_TRADE" || sig.action === "MARKET_MAKE") continue;
+          if (sig.confidence < 0.65 || sig.edge < 3) continue;
+
+          // Skip if already queued
+          const existing = await storage.getPendingTrades("pending");
+          if (existing.some((t) => t.ticker === sig.ticker && t.edgeSource === sig.strategyId)) continue;
+
+          await storage.createPendingTrade({
+            ticker: sig.ticker,
+            title: sig.title,
+            side: sig.side,
+            action: sig.action.startsWith("BUY") ? "buy" : "sell",
+            contracts: sig.contracts,
+            priceCents: sig.priceCents,
+            estimatedCost: parseFloat((sig.contracts * sig.priceCents / 100).toFixed(2)),
+            maxProfit: parseFloat((sig.contracts * (100 - sig.priceCents) / 100).toFixed(2)),
+            edgeScore: sig.edge,
+            trueProbability: sig.confidence,
+            marketPrice: sig.priceCents / 100,
+            modelConfidence: sig.confidence,
+            modelName: `Strategy-${sig.strategyName}`,
+            edgeSource: sig.strategyId,
+            reasoning: sig.reasoning,
+            status: currentMode === "autonomous" ? "approved" : "pending",
+            createdAt: new Date().toISOString(),
+            decidedAt: null,
+            executedAt: null,
+            orderId: null,
+            errorMessage: null,
+            gapType: "D",
+            executableEdge: sig.edge / 100,
+            kellySize: parseFloat((sig.contracts * sig.priceCents / 100).toFixed(2)),
+            autoExecuted: false,
+          });
+        }
+      }
+    } catch (e) {
+      console.error("[Strategy Engine] Background scan error:", e);
+    }
+  }, 45_000);
 
   // ── Live Signals (from signal engine) ────────────────────────────────────
   // Cache for live signals

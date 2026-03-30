@@ -19,6 +19,7 @@ import HumanInTheLoop from "@/pages/hitl";
 import AutonomousPage from "@/pages/autonomous";
 import TodaysPicks from "@/pages/picks";
 import LiveSportsPage from "@/pages/live-sports";
+import StrategiesPage from "@/pages/strategies";
 import { SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/app-sidebar";
 import { useEffect } from "react";
@@ -64,6 +65,7 @@ function AppRouter() {
       <Route path="/picks" component={TodaysPicks} />
       <Route path="/live-sports" component={LiveSportsPage} />
       <Route path="/autonomous" component={AutonomousPage} />
+      <Route path="/strategies" component={StrategiesPage} />
       <Route path="/backtest" component={Backtest} />
       <Route path="/compliance" component={Compliance} />
       <Route path="/settings" component={SettingsPage} />
