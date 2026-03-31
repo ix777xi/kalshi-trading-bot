@@ -55,10 +55,26 @@ export interface EntryDecision {
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-// Entry thresholds
+// Entry thresholds (from Kalshi Profit Strategies guide)
 const MIN_EDGE_STANDARD = 0.06;           // 6% minimum edge
 const MIN_EDGE_HIGH_CONVICTION = 0.10;    // 10% for larger sizes
 const MAX_SPORT_CONCENTRATION = 0.40;     // 40% max in one sport
+const KALSHI_FEE_ESTIMATE = 0.02;         // ~2% average Kalshi fee to subtract from gross edge
+const MIN_NET_EDGE_HIGH_CONF = 0.03;      // 3% net edge for confidence 8-10
+const MIN_NET_EDGE_MED_CONF = 0.07;       // 7% net edge for confidence 5-7
+const MIN_NET_EDGE_LOW_CONF = 0.12;       // 12%+ net edge for confidence 1-4
+const PRICE_FLOOR = 0.20;                 // Never buy contracts below 20¢ (longshot trap)
+const PRICE_CEILING = 0.85;               // Never buy contracts above 85¢ (max upside too low)
+const MAX_SPREAD = 0.05;                  // Skip markets with >5¢ bid-ask spread
+const MAX_TOTAL_OPEN_PCT = 0.30;          // Max 30% of bankroll in open positions simultaneously
+const MIN_HOURS_TO_RESOLVE = 1;           // No trades resolving in < 1 hour
+const PREFER_MAX_DAYS = 30;               // Prefer markets resolving within 30 days
+
+// Category priority (from research: maker edge by category)
+// 1=Finance/Macro, 2=Weather, 3=Politics, 4=Crypto, 5=World Events, 6=Sports/Entertainment
+const CATEGORY_PRIORITY: Record<string, number> = {
+  finance: 1, weather: 2, politics: 3, crypto: 4, novelty: 5, sports: 6,
+};
 
 // Position sizing
 const KELLY_STANDARD = 0.20;             // 0.20x Kelly for 6-10% edges
@@ -372,15 +388,39 @@ export function evaluateEntry(
     return { allowed: false, reason: `Daily P&L at ${(dailyPnlPct * 100).toFixed(1)}% — below -10% halt threshold. No new buys.` };
   }
 
-  // 2. Minimum edge check
-  if (edgePct < MIN_EDGE_STANDARD) {
-    return { allowed: false, reason: `Edge ${(edgePct * 100).toFixed(1)}% below minimum 6% threshold` };
+  // 2. Price range gate: only trade 20-85¢ contracts (from PDF: avoid extreme mispricings)
+  if (signal.marketPrice < PRICE_FLOOR) {
+    return { allowed: false, reason: `Price ${(signal.marketPrice * 100).toFixed(0)}¢ below ${(PRICE_FLOOR * 100).toFixed(0)}¢ floor — longshots are structurally -EV (contracts at 5¢ win only 4.18%)` };
+  }
+  if (signal.marketPrice > PRICE_CEILING) {
+    return { allowed: false, reason: `Price ${(signal.marketPrice * 100).toFixed(0)}¢ above ${(PRICE_CEILING * 100).toFixed(0)}¢ ceiling — insufficient upside for the risk` };
   }
 
-  // 3. Categorize the signal
+  // 3. Net edge after fees (PDF: always calculate net edge after Kalshi fees)
+  const netEdgePct = edgePct - KALSHI_FEE_ESTIMATE;
+  if (netEdgePct <= 0) {
+    return { allowed: false, reason: `Net edge after fees: ${(netEdgePct * 100).toFixed(1)}% (gross ${(edgePct * 100).toFixed(1)}% - ${(KALSHI_FEE_ESTIMATE * 100).toFixed(0)}% fee) — not profitable` };
+  }
+
+  // 4. Confidence-scaled edge threshold (PDF edge threshold rules)
+  const confidenceScore = Math.round(signal.modelConfidence * 10); // 0-10 scale
+  let requiredNetEdge = MIN_NET_EDGE_LOW_CONF;
+  if (confidenceScore >= 8) requiredNetEdge = MIN_NET_EDGE_HIGH_CONF;
+  else if (confidenceScore >= 5) requiredNetEdge = MIN_NET_EDGE_MED_CONF;
+  if (netEdgePct < requiredNetEdge) {
+    return { allowed: false, reason: `Net edge ${(netEdgePct * 100).toFixed(1)}% below required ${(requiredNetEdge * 100).toFixed(0)}% for confidence ${confidenceScore}/10` };
+  }
+
+  // 5. Total open position cap: max 30% of bankroll simultaneously
+  const totalOpenExposure = existingPositions.reduce((sum, p) => sum + p.quantity * p.currentPrice, 0);
+  if (portfolioValue > 0 && totalOpenExposure / portfolioValue > MAX_TOTAL_OPEN_PCT) {
+    return { allowed: false, reason: `Total open exposure ${((totalOpenExposure / portfolioValue) * 100).toFixed(1)}% exceeds ${(MAX_TOTAL_OPEN_PCT * 100).toFixed(0)}% max` };
+  }
+
+  // 6. Categorize the signal
   const category = categorizeFromTicker(signal.ticker);
 
-  // 4. Sport concentration check
+  // 7. Sport concentration check
   if (category === "sports") {
     const sportKey = guessSportFromTicker(signal.ticker);
     const currentExposure = sportExposure[sportKey] || 0;
@@ -389,7 +429,7 @@ export function evaluateEntry(
     }
   }
 
-  // 5. Weather/novelty cap: max 3% of portfolio
+  // 8. Weather/novelty cap: max 3% of portfolio
   if (category === "weather" || category === "novelty") {
     const catExposure = existingPositions
       .filter(p => p.category === category)
@@ -399,7 +439,7 @@ export function evaluateEntry(
     }
   }
 
-  // 6. Single event cap: max 8% of portfolio
+  // 9. Single event cap: max 8% of portfolio
   const eventTicker = signal.ticker.split("-").slice(0, -1).join("-");
   const eventExposure = existingPositions
     .filter(p => p.ticker.startsWith(eventTicker))
@@ -408,7 +448,7 @@ export function evaluateEntry(
     return { allowed: false, reason: `Event '${eventTicker}' exposure at ${((eventExposure / portfolioValue) * 100).toFixed(1)}% — exceeds 8% single event cap` };
   }
 
-  // 7. Calculate Kelly size
+  // 10. Calculate Kelly size
   const isHighConviction = edgePct >= MIN_EDGE_HIGH_CONVICTION;
   const kellyMultiplier = isHighConviction ? KELLY_HIGH_CONVICTION : KELLY_STANDARD;
 
@@ -421,7 +461,7 @@ export function evaluateEntry(
   const fractionalKelly = Math.max(0, fullKelly * kellyMultiplier);
   let positionDollars = fractionalKelly * portfolioValue;
 
-  // 8. Apply hard caps
+  // 11. Apply hard caps
   // Single event cap
   positionDollars = Math.min(positionDollars, portfolioValue * MAX_SINGLE_EVENT_PCT);
   // Weather/novelty cap
