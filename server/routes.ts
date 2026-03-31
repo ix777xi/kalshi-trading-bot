@@ -15,7 +15,8 @@ import {
 } from "./sports-agent";
 import {
   evaluatePosition, evaluateEntry, evaluateHedge, dailyScan, markTierTaken,
-  type PositionState, type DecisionAction,
+  researchBeforeTrade, researchPositionForHedge,
+  type PositionState, type DecisionAction, type ResearchResult,
 } from "./decision-engine";
 import {
   runStrategyScanner, getStrategies, updateStrategy,
@@ -2069,6 +2070,18 @@ export async function registerRoutes(
           }
         }
 
+        // Pre-trade research validation: verify signal against current market data
+        if (!isSell) {
+          const research = researchBeforeTrade(sig);
+          if (!research.valid) {
+            console.log(`[Research] BLOCKED: ${sig.ticker} — ${research.reason}`);
+            continue;
+          }
+          if (research.flags.length > 0) {
+            console.log(`[Research] OK with flags: ${sig.ticker} — ${research.flags.join(" | ")}`);
+          }
+        }
+
         const side = (sig.signalType === "BUY_YES" || sig.signalType === "SELL_YES") ? "yes" : "no";
         const action = isSell ? "sell" : "buy";
         const priceCents = Math.round(sig.marketPrice * 100);
@@ -2461,6 +2474,36 @@ export async function registerRoutes(
             autoExecuted: false,
           });
           console.log(`[Decision Engine] Queued ${decision.type} for HITL: ${posState.ticker} — ${decision.reason}`);
+        }
+      }
+
+      // ── Research-based position re-evaluation & auto-hedge ───────────────
+      // Re-check each position: if prediction looks wrong based on price trends, auto-sell to hedge
+      for (const posState of positionStates) {
+        if (existingExitTickers.has(posState.ticker)) continue;
+
+        const hedgeAction = researchPositionForHedge(posState, portfolioValue);
+        if (hedgeAction) {
+          const side = posState.side;
+          const priceCents = Math.round(posState.currentPrice * 100);
+
+          if (currentMode === "autonomous" || currentMode === "supervised") {
+            const execResult = await autoExecuteTrade(posState.ticker, side, "sell", hedgeAction.contracts, priceCents);
+            if (execResult.ok) {
+              capitalFreed += hedgeAction.contracts * posState.currentPrice;
+              console.log(`[Research Hedge] ${hedgeAction.type}: ${posState.ticker} — ${hedgeAction.reason}`);
+              await storage.createAuditLog({
+                eventType: "RESEARCH_HEDGE" as any,
+                ticker: posState.ticker,
+                description: `[${hedgeAction.type}] ${hedgeAction.reason}`,
+                amount: hedgeAction.contracts * posState.currentPrice,
+                status: "ok",
+                createdAt: new Date().toISOString(),
+              });
+            }
+          } else {
+            console.log(`[Research Hedge] Queued for HITL: ${posState.ticker} — ${hedgeAction.reason}`);
+          }
         }
       }
 

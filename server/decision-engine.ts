@@ -664,3 +664,129 @@ function guessSportFromTicker(ticker: string): string {
   if (/SOCCER/.test(t)) return "soccer";
   return "other";
 }
+
+// ── Pre-Trade Research Validation ──────────────────────────────────────────
+// Before placing ANY trade, verify signal against current market data.
+
+export interface ResearchResult {
+  valid: boolean;
+  reason: string;
+  adjustedConfidence: number;
+  flags: string[];
+}
+
+const priceTracker: Map<string, number[]> = new Map();
+
+export function researchBeforeTrade(signal: {
+  ticker: string;
+  signalType: string;
+  marketPrice: number;
+  trueProbability: number;
+  edgeScore: number;
+  modelConfidence: number;
+  edgeSource: string;
+}): ResearchResult {
+  const flags: string[] = [];
+  let conf = signal.modelConfidence;
+  const ticker = signal.ticker;
+
+  let history = priceTracker.get(ticker);
+  if (!history) { history = []; priceTracker.set(ticker, history); }
+  history.push(signal.marketPrice);
+  if (history.length > 30) history.shift();
+
+  const isBuyYes = signal.signalType === "BUY_YES";
+  const isBuyNo = signal.signalType === "BUY_NO";
+
+  // Check 1: Price momentum contradicts signal
+  if (history.length >= 3) {
+    const recent = history.slice(-3);
+    const change = recent[recent.length - 1] - recent[0];
+    if (isBuyYes && change < -0.03) {
+      conf *= 0.7;
+      flags.push(`PRICE FALLING ${(change * 100).toFixed(1)}c — contradicts BUY YES`);
+    } else if (isBuyNo && change > 0.03) {
+      conf *= 0.7;
+      flags.push(`PRICE RISING ${(change * 100).toFixed(1)}c — contradicts BUY NO`);
+    } else if ((isBuyYes && change > 0.02) || (isBuyNo && change < -0.02)) {
+      conf = Math.min(0.98, conf * 1.1);
+      flags.push("Price confirms direction");
+    }
+  }
+
+  // Check 2: Model vs market divergence too extreme = model error
+  const divergence = Math.abs(signal.trueProbability - signal.marketPrice);
+  if (divergence > 0.40) {
+    conf *= 0.5;
+    flags.push(`EXTREME DIVERGENCE: model ${(signal.trueProbability * 100).toFixed(0)}% vs market ${(signal.marketPrice * 100).toFixed(0)}c = ${(divergence * 100).toFixed(0)}pp gap`);
+  }
+
+  // Check 3: Low activity = stale/illiquid
+  if (history.length >= 5) {
+    const last5 = history.slice(-5);
+    const range = Math.max(...last5) - Math.min(...last5);
+    if (range < 0.005) {
+      conf *= 0.85;
+      flags.push("LOW ACTIVITY: price flat <0.5c over 5 readings");
+    }
+  }
+
+  // Check 4: Edge too thin for spread
+  if (Math.abs(signal.edgeScore) < 4) {
+    conf *= 0.75;
+    flags.push(`THIN EDGE: ${Math.abs(signal.edgeScore).toFixed(1)}% may not survive spread`);
+  }
+
+  // Verdict
+  if (conf < 0.35) {
+    return { valid: false, reason: `Research BLOCKED: confidence ${(conf * 100).toFixed(0)}% too low. ${flags.join(" | ")}`, adjustedConfidence: conf, flags };
+  }
+  if (flags.some(f => f.includes("contradicts")) && Math.abs(signal.edgeScore) < 8) {
+    return { valid: false, reason: `Research BLOCKED: price contradicts with only ${Math.abs(signal.edgeScore).toFixed(1)}% edge. ${flags.join(" | ")}`, adjustedConfidence: conf, flags };
+  }
+
+  return { valid: true, reason: flags.length > 0 ? `Research OK: ${flags.join(" | ")}` : "Research OK: no red flags", adjustedConfidence: conf, flags };
+}
+
+// ── Position Re-Evaluation & Auto-Hedge ──────────────────────────────────────
+// Re-check each position every cycle: if prediction looks wrong, auto-sell.
+
+export function researchPositionForHedge(
+  position: PositionState,
+  portfolioValue: number,
+): DecisionAction | null {
+  const history = priceTracker.get(position.ticker);
+  const isYes = position.side === "yes";
+
+  const currentEdge = isYes
+    ? (position.currentPrice - position.entryPrice)
+    : (position.entryPrice - position.currentPrice);
+
+  let trendAgainst = false;
+  if (history && history.length >= 5) {
+    const last5 = history.slice(-5);
+    const trend = last5[last5.length - 1] - last5[0];
+    trendAgainst = (isYes && trend < -0.03) || (!isYes && trend > 0.03);
+  }
+
+  // HEDGE: 10%+ loss AND trending against
+  if (currentEdge < -0.10 && trendAgainst) {
+    const sellQty = Math.ceil(position.quantity * 0.5);
+    const reason = `RESEARCH HEDGE: ${position.ticker} ${position.side.toUpperCase()} losing ${(Math.abs(currentEdge) * 100).toFixed(1)}% + trending against. Selling ${sellQty}/${position.quantity}.`;
+    return {
+      type: "HEDGE", ticker: position.ticker, contracts: sellQty, reason, urgency: "immediate",
+      logEntry: buildTradeLog("HEDGE", position, sellQty, reason, portfolioValue),
+    };
+  }
+
+  // FULL EXIT: 15%+ loss = prediction was wrong
+  if (currentEdge < -0.15) {
+    const reason = `RESEARCH EXIT: ${position.ticker} ${position.side.toUpperCase()} edge FLIPPED — down ${(Math.abs(currentEdge) * 100).toFixed(1)}%. Full exit.`;
+    return {
+      type: "SELL", ticker: position.ticker, contracts: position.quantity, reason, urgency: "immediate",
+      logEntry: buildTradeLog("SELL", position, position.quantity, reason, portfolioValue),
+    };
+  }
+
+  return null;
+}
