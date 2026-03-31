@@ -172,7 +172,7 @@ function runContrarianNo(markets: any[]): StrategySignal[] {
     const noPrice = 1 - mid;
     const contracts = Math.max(1, Math.floor(20 / Math.max(noPrice, 0.01)));
     const expectedProfit = contracts * discount;
-    if (expectedProfit < 1) continue;
+    if (expectedProfit < 20) continue; // $20 minimum profit
     signals.push({
       id: `contrarian_no-${m.ticker}-${Date.now()}`, strategyId: "contrarian_no", strategyName: "Contrarian NO",
       ticker: m.ticker, title: m.title || m.ticker,
@@ -202,7 +202,7 @@ function runEndgameSweep(markets: any[]): StrategySignal[] {
     const profit = (1 - yesBid);
     const contracts = Math.max(1, Math.floor(20 / yesBid));
     const expectedProfit = contracts * profit;
-    if (expectedProfit < 1) continue;
+    if (expectedProfit < 20) continue; // $20 minimum profit
     signals.push({
       id: `endgame-${m.ticker}-${Date.now()}`, strategyId: "endgame_sweep", strategyName: "Endgame Sweep",
       ticker: m.ticker, title: m.title || m.ticker,
@@ -238,7 +238,7 @@ function runTimeDecay(markets: any[]): StrategySignal[] {
     const noPrice = 1 - mid;
     const contracts = Math.max(1, Math.floor(15 / Math.max(noPrice, 0.01)));
     const expectedProfit = contracts * decayBoost;
-    if (expectedProfit < 1) continue;
+    if (expectedProfit < 20) continue; // $20 minimum profit
     signals.push({
       id: `time_decay-${m.ticker}-${Date.now()}`, strategyId: "time_decay", strategyName: "Time Decay",
       ticker: m.ticker, title: m.title || m.ticker,
@@ -270,7 +270,7 @@ function runFLBExploit(markets: any[]): StrategySignal[] {
       if (edge < 2) continue;
       const contracts = Math.max(1, Math.floor(20 / mid));
       const expectedProfit = contracts * (actualWinRate - mid);
-      if (expectedProfit < 1) continue;
+      if (expectedProfit < 20) continue; // $20 minimum profit
       signals.push({
         id: `flb-${m.ticker}-${Date.now()}`, strategyId: "flb_exploit", strategyName: "FLB Exploit",
         ticker: m.ticker, title: m.title || m.ticker,
@@ -319,7 +319,7 @@ function runSpreadCapture(markets: any[]): StrategySignal[] {
     const edge = spread * 100 / 2; // Capture half the spread
     const contracts = Math.max(1, Math.floor(15 / mid));
     const expectedProfit = contracts * spread / 2 + contracts * 0.0005; // + maker rebate
-    if (expectedProfit < 0.50) continue;
+    if (expectedProfit < 20) continue; // $20 minimum profit
     signals.push({
       id: `spread-${m.ticker}-${Date.now()}`, strategyId: "spread_capture", strategyName: "Spread Capture",
       ticker: m.ticker, title: m.title || m.ticker,

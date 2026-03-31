@@ -1623,6 +1623,13 @@ export async function registerRoutes(
 
       for (const pick of picks) {
         try {
+          // $20 minimum projected profit filter
+          const pickMaxProfit = pick.maxProfit || 0;
+          if (pickMaxProfit < 20) {
+            details.push({ ticker: pick.ticker, status: "skipped", message: `Projected profit $${pickMaxProfit.toFixed(2)} below $20 minimum` });
+            continue;
+          }
+
           // Create pending trade with status approved
           const trade = await storage.createPendingTrade({
             ticker: pick.ticker,
@@ -1807,7 +1814,14 @@ export async function registerRoutes(
       const contractPrice = side === "yes" ? signal.kalshiPrice : (1 - signal.kalshiPrice);
       const contracts = Math.max(1, Math.floor(signal.positionSizeUsd / Math.max(contractPrice, 0.01)));
 
-      console.log(`[Sports Agent] Executing: ${action} ${side} ${contracts}x ${signal.ticker} @ ${priceCents}¢ | Edge: ${signal.edge.toFixed(1)}%`);
+      // $20 minimum projected profit filter
+      const maxProfitPerContract = side === "yes" ? (1 - signal.kalshiPrice) : signal.kalshiPrice;
+      const projectedProfit = contracts * maxProfitPerContract;
+      if (projectedProfit < 20) {
+        return res.status(400).json({ error: `Projected profit $${projectedProfit.toFixed(2)} below $20 minimum. Not worth the risk.` });
+      }
+
+      console.log(`[Sports Agent] Executing: ${action} ${side} ${contracts}x ${signal.ticker} @ ${priceCents}¢ | Edge: ${signal.edge.toFixed(1)}% | Projected profit: $${projectedProfit.toFixed(2)}`);
 
       const execResult = await autoExecuteTrade(signal.ticker, side, action, contracts, priceCents);
       if (execResult.ok) {
@@ -1867,6 +1881,14 @@ export async function registerRoutes(
 
           const contractPrice = side === "yes" ? sig.kalshiPrice : (1 - sig.kalshiPrice);
           const contracts = Math.max(1, Math.floor(sig.positionSizeUsd / Math.max(contractPrice, 0.01)));
+
+          // $20 minimum projected profit filter
+          const maxProfitPerContract = side === "yes" ? (1 - sig.kalshiPrice) : sig.kalshiPrice;
+          const projectedProfit = contracts * maxProfitPerContract;
+          if (projectedProfit < 20) {
+            console.log(`[Sports Agent] Skipping ${sig.ticker}: projected profit $${projectedProfit.toFixed(2)} < $20 minimum`);
+            continue;
+          }
 
           try {
             const execResult = await autoExecuteTrade(sig.ticker, side, action, contracts, priceCents);
