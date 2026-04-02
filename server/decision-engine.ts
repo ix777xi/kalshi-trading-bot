@@ -3,6 +3,8 @@
  * stop-losses, hedging, and position monitoring.
  */
 
+import { getAdaptiveKellyMultiplier, shouldPauseTrading } from "./performance-tracker";
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 export interface PositionState {
@@ -383,6 +385,11 @@ export function evaluateEntry(
 ): EntryDecision {
   const edgePct = Math.abs(signal.edgeScore) / 100; // convert from percentage to decimal
 
+  // 0. Performance-based pause: block ALL entries if win rate < 40%
+  if (shouldPauseTrading()) {
+    return { allowed: false, reason: "Trading paused: recent win rate below 40% — adaptive Kelly = 0" };
+  }
+
   // 1. Daily loss halt
   if (dailyPnlPct < DAILY_DOWN_HALT_PCT) {
     return { allowed: false, reason: `Daily P&L at ${(dailyPnlPct * 100).toFixed(1)}% — below -10% halt threshold. No new buys.` };
@@ -448,9 +455,11 @@ export function evaluateEntry(
     return { allowed: false, reason: `Event '${eventTicker}' exposure at ${((eventExposure / portfolioValue) * 100).toFixed(1)}% — exceeds 8% single event cap` };
   }
 
-  // 10. Calculate Kelly size
+  // 10. Calculate Kelly size (adaptive multiplier from performance tracker)
+  const baseMultiplier = getAdaptiveKellyMultiplier();
   const isHighConviction = edgePct >= MIN_EDGE_HIGH_CONVICTION;
-  const kellyMultiplier = isHighConviction ? KELLY_HIGH_CONVICTION : KELLY_STANDARD;
+  // High conviction gets a 1.75x bump on the adaptive base (e.g. 0.20 → 0.35)
+  const kellyMultiplier = isHighConviction ? Math.min(baseMultiplier * 1.75, 0.40) : baseMultiplier;
 
   // Kelly formula: f* = (bp - q) / b
   // where b = odds, p = true prob, q = 1 - p

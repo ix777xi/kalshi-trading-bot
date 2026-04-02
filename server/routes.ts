@@ -19,6 +19,10 @@ import {
   type PositionState, type DecisionAction, type ResearchResult,
 } from "./decision-engine";
 import {
+  getAdaptiveKellyMultiplier, getPerformanceSummary, getPerformanceData,
+  recordTradeOutcome, type TradeOutcome,
+} from "./performance-tracker";
+import {
   runStrategyScanner, getStrategies, updateStrategy,
   type StrategyState,
 } from "./strategy-engine";
@@ -2281,7 +2285,30 @@ export async function registerRoutes(
     }
   }
 
-  setInterval(() => runSignalScan(), 60_000);
+  // ── Smart Scan Frequency ─────────────────────────────────────────────────
+  function getSmartScanInterval(): number {
+    const now = new Date();
+    const etHour = (now.getUTCHours() - 4 + 24) % 24; // ET offset
+
+    // Check for live games (from sports agent state)
+    if (sportsAgentState?.signals.some((s: SportsSignal) => s.isLive)) return 15_000; // 15s
+
+    // Market hours: 6am-10pm ET
+    if (etHour >= 6 && etHour < 22) return 30_000; // 30s
+
+    // Off hours
+    return 300_000; // 5 minutes
+  }
+
+  let scanTimer: NodeJS.Timeout;
+  function scheduleNextScan() {
+    const interval = getSmartScanInterval();
+    scanTimer = setTimeout(async () => {
+      await runSignalScan();
+      scheduleNextScan(); // reschedule with potentially different interval
+    }, interval);
+  }
+  scheduleNextScan();
 
   // Kick off initial scan after 5 seconds (so server is fully up)
   setTimeout(() => runSignalScan(true), 5_000);
@@ -2343,6 +2370,24 @@ export async function registerRoutes(
             autoExecuted = true;
             capitalFreed += estimatedValue;
             console.log(`[Exit Monitor] AUTO-SOLD: ${sig.ticker} (${sig.edgeSource}) — $${estimatedValue.toFixed(2)} freed`);
+
+            // Record trade outcome for performance tracking
+            if (posRow) {
+              const entryPrice = posRow.entryPrice;
+              const exitPrice = sig.marketPrice;
+              const pnl = (exitPrice - entryPrice) * contracts * (side === "yes" ? 1 : -1);
+              recordTradeOutcome({
+                ticker: sig.ticker,
+                category: categorizePosition(sig.ticker),
+                edgeSource: sig.edgeSource || "signal_engine",
+                entryPrice,
+                exitPrice,
+                side: side as "yes" | "no",
+                pnl,
+                won: pnl > 0,
+                timestamp: Date.now(),
+              });
+            }
 
             await storage.createAuditLog({
               eventType: "ORDER_PLACED",
@@ -2435,6 +2480,21 @@ export async function registerRoutes(
             markTierTaken(posState.ticker, decision.tier ?? 0);
             capitalFreed += decision.contracts * posState.currentPrice;
             console.log(`[Decision Engine] ${decision.type}: ${posState.ticker} — ${decision.reason}`);
+
+            // Record trade outcome for performance tracking
+            const pnl = (posState.currentPrice - posState.entryPrice) * decision.contracts * (side === "yes" ? 1 : -1);
+            recordTradeOutcome({
+              ticker: posState.ticker,
+              category: posState.category,
+              edgeSource: `decision_engine_${decision.type.toLowerCase()}`,
+              entryPrice: posState.entryPrice,
+              exitPrice: posState.currentPrice,
+              side: posState.side,
+              pnl,
+              won: pnl > 0,
+              timestamp: Date.now(),
+            });
+
             await storage.createAuditLog({
               eventType: "DECISION_ENGINE" as any,
               ticker: posState.ticker,
@@ -2492,6 +2552,21 @@ export async function registerRoutes(
             if (execResult.ok) {
               capitalFreed += hedgeAction.contracts * posState.currentPrice;
               console.log(`[Research Hedge] ${hedgeAction.type}: ${posState.ticker} — ${hedgeAction.reason}`);
+
+              // Record trade outcome for performance tracking
+              const hedgePnl = (posState.currentPrice - posState.entryPrice) * hedgeAction.contracts * (side === "yes" ? 1 : -1);
+              recordTradeOutcome({
+                ticker: posState.ticker,
+                category: posState.category,
+                edgeSource: `research_hedge_${hedgeAction.type.toLowerCase()}`,
+                entryPrice: posState.entryPrice,
+                exitPrice: posState.currentPrice,
+                side: posState.side,
+                pnl: hedgePnl,
+                won: hedgePnl > 0,
+                timestamp: Date.now(),
+              });
+
               await storage.createAuditLog({
                 eventType: "RESEARCH_HEDGE" as any,
                 ticker: posState.ticker,
@@ -2521,6 +2596,25 @@ export async function registerRoutes(
 
   setInterval(() => runPositionExitMonitor(), 60_000);
   setTimeout(() => runPositionExitMonitor(), 8_000);
+
+  // ── Performance API ─────────────────────────────────────────────────────
+  app.get("/api/performance", (_req, res) => {
+    try {
+      res.json(getPerformanceData());
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/performance/record", (req, res) => {
+    try {
+      const outcome: TradeOutcome = req.body;
+      recordTradeOutcome(outcome);
+      res.json({ ok: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
 
   // ── Live Sports Engine ───────────────────────────────────────────────────
   let liveSportsEnabled = false;
