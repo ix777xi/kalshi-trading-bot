@@ -72,6 +72,13 @@ const MAX_TOTAL_OPEN_PCT = 0.30;          // Max 30% of bankroll in open positio
 const MIN_HOURS_TO_RESOLVE = 1;           // No trades resolving in < 1 hour
 const PREFER_MAX_DAYS = 30;               // Prefer markets resolving within 30 days
 
+// From PDF "Making Money on Prediction Markets with Bots"
+// Adverse selection & liquidity filters (p.4, p.7)
+const MAX_POSITION_LIQUIDITY_PCT = 0.05;  // Max 5% of available liquidity per position (avoid moving market)
+const MIN_OPEN_INTEREST = 100;            // Minimum OI to avoid adverse selection in illiquid markets
+const ADVERSE_SELECTION_THRESHOLD = 0.15; // If market moved 15%+ in last scan cycle = informed flow, avoid
+const USE_ASK_PRICE_FOR_COST = true;      // Use ASK price (not BID/mid) for cost calculation — fixes backtest vs live gap
+
 // Category priority (from research: maker edge by category)
 // 1=Finance/Macro, 2=Weather, 3=Politics, 4=Crypto, 5=World Events, 6=Sports/Entertainment
 const CATEGORY_PRIORITY: Record<string, number> = {
@@ -395,7 +402,24 @@ export function evaluateEntry(
     return { allowed: false, reason: `Daily P&L at ${(dailyPnlPct * 100).toFixed(1)}% — below -10% halt threshold. No new buys.` };
   }
 
-  // 2. Price range gate: only trade 20-85¢ contracts (from PDF: avoid extreme mispricings)
+  // 2a. Adverse selection filter (PDF p.7): avoid trading in markets where informed flow just moved the price
+  // If marketPrice changed >15% in last scan cycle, an informed whale is likely moving the market — don't be the counterparty
+  const priceHistory = (researchBeforeTrade as any)._priceTracker?.get?.(signal.ticker);
+  if (priceHistory && priceHistory.length >= 2) {
+    const lastTwo = priceHistory.slice(-2);
+    const recentChange = Math.abs(lastTwo[1] - lastTwo[0]) / Math.max(lastTwo[0], 0.01);
+    if (recentChange > ADVERSE_SELECTION_THRESHOLD) {
+      return { allowed: false, reason: `Adverse selection: price moved ${(recentChange * 100).toFixed(1)}% in last cycle — informed flow detected, avoid` };
+    }
+  }
+
+  // 2b. Liquidity depth: limit position to 5% of available open interest to avoid moving the market
+  const openInterest = signal.liquidityDepth || signal.kellySize || 0;
+  if (openInterest > 0 && openInterest < MIN_OPEN_INTEREST) {
+    return { allowed: false, reason: `Low liquidity: OI ${openInterest} below ${MIN_OPEN_INTEREST} minimum — adverse selection risk` };
+  }
+
+  // 2c. Price range gate: only trade 20-85¢ contracts (from PDF: avoid extreme mispricings)
   if (signal.marketPrice < PRICE_FLOOR) {
     return { allowed: false, reason: `Price ${(signal.marketPrice * 100).toFixed(0)}¢ below ${(PRICE_FLOOR * 100).toFixed(0)}¢ floor — longshots are structurally -EV (contracts at 5¢ win only 4.18%)` };
   }

@@ -346,9 +346,44 @@ function runStrategy(id: string, markets: any[]): StrategySignal[] {
     case "platt_calibration": return []; // Applied as calibration layer, not standalone signals
     case "momentum_live": return []; // Handled by sports-agent.ts and live-sports-engine.ts
     case "order_flow": return []; // Needs order book depth data (premium API)
-    case "market_making": return []; // Needs significant capital + infrastructure
+    case "market_making": return runNewMarketMaker(markets); // Target new/thin markets for spread capture
     default: return [];
   }
+}
+
+// Strategy 11: New Market Maker (PDF p.5, p.9)
+// Target newly launched markets with thin order books — wider spreads available
+// before institutional market makers arrive. Post tight quotes to capture spread.
+function runNewMarketMaker(markets: any[]): StrategySignal[] {
+  const signals: StrategySignal[] = [];
+  for (const m of markets) {
+    const vol = parseInt(m.volume_fp || "0", 10) || 0;
+    const oi = parseInt(m.open_interest_fp || "0", 10) || 0;
+    const yesBid = parseFloat(m.yes_bid_dollars || "0");
+    const yesAsk = parseFloat(m.yes_ask_dollars || "0");
+    if (yesBid <= 0 || yesAsk <= 0) continue;
+    const spread = yesAsk - yesBid;
+    const mid = (yesBid + yesAsk) / 2;
+    if (mid < 0.15 || mid > 0.85) continue;
+
+    // New/thin markets: low volume + low OI + wide spread
+    if (vol < 500 && oi < 300 && spread >= 0.06) {
+      // Post at mid - 1c as maker, profit = half spread + rebate
+      const profitPerContract = spread / 2;
+      const contracts = Math.max(1, Math.floor(15 / mid));
+      const expectedProfit = contracts * profitPerContract;
+      if (expectedProfit < 20) continue;
+      signals.push({
+        id: `newmkt-${m.ticker}-${Date.now()}`, strategyId: "market_making", strategyName: "New Market Maker",
+        ticker: m.ticker, title: m.title || m.ticker,
+        action: "BUY_YES", side: "yes", priceCents: Math.round((yesBid + 0.01) * 100),
+        contracts, edge: profitPerContract * 100, expectedProfit: Math.round(expectedProfit * 100) / 100,
+        confidence: 0.60, reasoning: `New/thin market: vol=${vol}, OI=${oi}, spread=${(spread * 100).toFixed(0)}c. Post maker order at ${Math.round((yesBid + 0.01) * 100)}c to capture ${(profitPerContract * 100).toFixed(0)}c spread. Arrives before institutional MMs.`,
+        urgency: "patient", createdAt: new Date().toISOString(),
+      });
+    }
+  }
+  return signals.sort((a, b) => b.expectedProfit - a.expectedProfit).slice(0, 3);
 }
 
 // Apply Platt calibration to all confidence scores
